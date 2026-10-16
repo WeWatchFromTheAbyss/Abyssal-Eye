@@ -140,6 +140,7 @@ const UPDATE_URL = 'https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssa
 let updateAvail = '' // a newer published version, when known
 let updating = false // the update commands are running
 let claudeExe = 'claude' // the claude executable the update commands run through
+let historyWanted = false // earlier sessions of the project seed the map (opt in)
 let turnBusy = false // Claude is mid-turn on the main loop: an open prompt would queue behind it
 let setOpening: (b: boolean) => void = b => { opening = b }
 /**
@@ -280,7 +281,7 @@ export const register: Register = on => {
           ...(task ? { task: short(task, 160) } : {}), ...(from ? { spawn: from.id } : {}), ...(from?.role ? { role: from.role } : {}) }, m.t)
       }
       if (m.type === 'prompt') {
-        if (actor === me.main) tr.emit({ type: 'prompt', text: short(m.text, 200), by: 'you', actor: me.main }, m.t)
+        if (actor === me.main) tr.emit({ type: 'prompt', text: short(m.text, 80), by: 'you', actor: me.main }, m.t)
       } else if (m.type === 'use') {
         const kind = kindOf(m.tool)
         const path = str(m.input, 'file_path') ?? str(m.input, 'notebook_path') ?? str(m.input, 'path')
@@ -346,7 +347,15 @@ export const register: Register = on => {
       }
     }
     tr.hold = true; tr.replaying = true
-    void replay().catch(() => undefined).then(() => { tr.replaying = false; tr.release() }).then(() => earlier().catch(() => undefined))
+    // earlier sessions seed the map only when asked for: ABYSSAL_EYE_HISTORY=1, or the view's H key (kept per viewer,
+    // told through the server, and remembered here in abyssal-eye-prefs.json); the seed runs once per session
+    let seeded = false
+    const prefsFile = config + '/abyssal-eye-prefs.json'
+    let prefs: { history?: boolean } = {}
+    try { prefs = JSON.parse(await $.fs.read(prefsFile).catch(() => '{}')) as typeof prefs } catch { prefs = {} }
+    historyWanted = (await $.env.get('ABYSSAL_EYE_HISTORY').catch(() => undefined)) === '1' || prefs.history === true
+    const seedHistory = () => { if (seeded) return; seeded = true; void earlier().catch(() => undefined) }
+    void replay().catch(() => undefined).then(() => { tr.replaying = false; tr.release() }).then(() => { if (historyWanted) seedHistory() })
 
     await $.command.register({ name: 'abyssal-eye', description: 'Open the Abyssal Eye live view in the browser pane (/abyssal-eye browser: system browser)' })
 
@@ -387,6 +396,10 @@ export const register: Register = on => {
     // the daily update check, off the critical path and silent when anything fails; ABYSSAL_EYE_NO_UPDATE_CHECK=1
     // (or Claude Code's own non-essential traffic switch) turns it off
     const checkUpdate = async () => {
+      // the shipped config.json can turn the check off for a whole distribution
+      let cfg: { updateCheck?: boolean } = {}
+      try { cfg = JSON.parse(await $.fs.read($.plugin.root.replace(/[\\/]+$/, '') + '/config.json').catch(() => '{}')) as typeof cfg } catch { cfg = {} }
+      if (cfg.updateCheck !== true) return
       if ((await $.env.get('ABYSSAL_EYE_NO_UPDATE_CHECK').catch(() => undefined)) === '1') return
       if (await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC').catch(() => undefined)) return
       const envExe = await $.env.get('CLAUDE_CODE_EXECUTABLE').catch(() => undefined)
@@ -461,6 +474,12 @@ export const register: Register = on => {
         if (Date.now() < passiveUntil) return
         $.http.fetch('http://127.0.0.1:' + port + '/ping' + q(), { method: 'POST', body: '' })
           .then(r => { if (r.status === 409) refused(); else if (!r.ok) dead() }, dead)
+        // the view's own switch for earlier sessions: seen through the server, acted on once, remembered
+        $.http.fetch('http://127.0.0.1:' + port + '/pref?p=' + encodeURIComponent(project.key)).then(r => {
+          if (!r.ok) return
+          const want = (JSON.parse(r.text) as { history?: number }).history === 1
+          if (want && !historyWanted) { historyWanted = true; seedHistory(); void $.fs.write(prefsFile, JSON.stringify({ history: true })).catch(() => undefined) }
+        }, () => undefined)
       } catch { dead() }
     })
 
@@ -524,7 +543,7 @@ export const register: Register = on => {
           void (async () => {
             const fail = (e: unknown) => ({ exitCode: 1, stdout: '', stderr: String(e) })
             const a = await $.process.run([claudeExe, 'plugin', 'marketplace', 'update', 'abyssal-eye']).catch(fail)
-            const b = a.exitCode === 0 ? await $.process.run([claudeExe, 'plugin', 'update', 'abyssal-eye-eye']).catch(fail) : a
+            const b = a.exitCode === 0 ? await $.process.run([claudeExe, 'plugin', 'update', 'abyssal-eye@abyssal-eye']).catch(fail) : a
             updating = false
             if (b.exitCode === 0) { $.ui.status('⛧ updated to ' + updateAvail + ', restart Claude Code to apply'); updateAvail = '' }
             else $.ui.status('⛧ update failed: ' + short(b.stderr || b.stdout || 'unknown error', 120))
@@ -545,11 +564,16 @@ export const register: Register = on => {
 
   // the standing note in the conversation's context: what the open line means, so any turn knows what to do with it
   on('prompt.context', async ($, e, next) => {
+    // the standing note in the conversation's context: what the open line means. next runs exactly once; a fault
+    // after it leaves the blocks as they came
     const r = await next(e)
-    for (let i = 0; i < 30 && !url && !unsupported; i++) await $.clock.sleep(100)
-    if (!url) return r
-    return { ...r, blocks: [...r.blocks, { name: 'abyssalEye', text: 'The Abyssal Eye plugin adds a button that sends the message "' + OPEN_TEXT + '". When the user\'s message is exactly that line: ' + openSteps() }] }
-  }).catch(($, e, next) => next(e))
+    try {
+      if (unsupported || !r || !Array.isArray(r.blocks)) return r
+      const neutral: SeenState = { alive: 0, visible: 0, current: 0, latest: 0 }
+      const steps = url ? openSteps(neutral, false) : 'Call the browser pane\'s preview_start tool with the view address the Abyssal Eye status line shows, make no other tool calls, and reply with exactly the single character ⛧.'
+      return { ...r, blocks: [...r.blocks, { name: 'abyssalEye', text: 'The Abyssal Eye plugin adds a button that sends the message "' + OPEN_TEXT + '". When the user\'s message is exactly that line: ' + steps }] }
+    } catch { return r }
+  })
 
   // the turn is over: Claude has nothing more to do until the human speaks again
   on('turn.complete', async ($, e, next) => { if (!e.agentId) turnBusy = false; tr.emit({ type: 'idle', actor: me.main }); return next(e) }).catch(($, e, next) => next(e))
@@ -560,7 +584,7 @@ export const register: Register = on => {
     if (e.text === OPEN_TEXT && !e.agentId) openWatch = Date.now()
     // agents' messages and harness notices are not the human's task
     if (!isHumanPrompt(e.text)) return next(e)
-    tr.emit({ type: 'prompt', text: short(e.text, 200), by: 'you', actor: me.main })
+    tr.emit({ type: 'prompt', text: short(e.text, 80), by: 'you', actor: me.main })
     return next(e)
   })
 
@@ -580,17 +604,19 @@ export const register: Register = on => {
     try {
       return yield* next(e)
     } finally {
-      tr.emit({ type: 'think', actor: me.main, on: false })
-      // the budget the souls stand for: how much of the context window is left after this call
-      const u = await $.session.usage().catch(() => undefined)
-      if (u && u.context.window > 0) {
-        const used = u.context.tokens ?? Math.round((u.context.percent ?? 0) / 100 * u.context.window)
-        const rate = u.rateLimits.reduce((m, r) => Math.max(m, r.percentUsed), 0)
-        if (used !== lastBudget) {
-          lastBudget = used
-          tr.emit({ type: 'budget', actor: me.main, used, window: u.context.window, ...(u.rateLimits.length ? { rate } : {}) })
+      try {
+        tr.emit({ type: 'think', actor: me.main, on: false })
+        // the budget the souls stand for: how much of the context window is left after this call
+        const u = await $.session.usage().catch(() => undefined)
+        if (u && u.context.window > 0) {
+          const used = u.context.tokens ?? Math.round((u.context.percent ?? 0) / 100 * u.context.window)
+          const rate = u.rateLimits.reduce((m, r) => Math.max(m, r.percentUsed), 0)
+          if (used !== lastBudget) {
+            lastBudget = used
+            tr.emit({ type: 'budget', actor: me.main, used, window: u.context.window, ...(u.rateLimits.length ? { rate } : {}) })
+          }
         }
-      }
+      } catch { /* the step itself is done; a fault here changes nothing */ }
     }
   })
 
@@ -668,6 +694,8 @@ export const register: Register = on => {
       const i = openCalls.findIndex(c => c.id === id)
       if (i >= 0) openCalls.splice(i, 1)
     }
+    // the tool has run: a fault from here on must never run it again (the hook's catch would), so it is swallowed
+    try {
     const failed = ran.deny !== undefined || ran.isError === true
 
     if ((kind === 'edit' || kind === 'write') && tr.tracked(rel) && path) {
@@ -704,6 +732,7 @@ export const register: Register = on => {
         }
       }
     }
+    } catch { /* the scope's own fault, after the tool */ }
     return ran
-  }).catch(($, e, next) => next(e)) // a fault in the scope must never block the tool
+  }).catch(($, e, next) => next(e)) // a fault in the scope before the tool must never block it
 }

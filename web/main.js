@@ -1306,7 +1306,14 @@ canvas.addEventListener('dblclick', e => { const N = hoverNode(); if (N) { if (N
 window.addEventListener('keydown', e => {
   if (e.key === 'q' || e.key === 'Q') { settings.q = (settings.q + 1) % 3; saveSettings(); resize(); showHint('quality: ' + QUAL[settings.q]) }
   else if (e.key === 'm' || e.key === 'M') { settings.m = (settings.m + 1) % 3; saveSettings(); showHint('motion: ' + MOT[settings.m]) }
+  else if (e.key === 'h' || e.key === 'H') { setHistoryPref(!historyPref()); showHint('earlier sessions on the map: ' + (historyPref() ? 'on (the plugin seeds them within 10 s)' : 'off (from the next session)')) }
 })
+// earlier sessions on the map: off unless asked for; the choice is the viewer's, kept in this browser and told to
+// the plugin through the server (same origin), which seeds the map when it sees it
+function historyPref() { try { return localStorage.getItem('abyssal-eye.history') === '1' } catch (e) { return false } }
+function setHistoryPref(on) { try { localStorage.setItem('abyssal-eye.history', on ? '1' : '0') } catch (e) { /* no storage */ } tellHistoryPref() }
+function tellHistoryPref() { if (DEMO || !PAGE_KEY) return; fetch('/pref?p=' + encodeURIComponent(PAGE_KEY) + '&history=' + (historyPref() ? 1 : 0), { method: 'POST' }).catch(() => { /* the server may be gone */ }) }
+setTimeout(tellHistoryPref, 300)
 window.addEventListener('resize', resize)
 // the pane may open collapsed or hidden and gain its size later: every change of size (and every return to view)
 // resizes the canvas, and the first real size frames the map

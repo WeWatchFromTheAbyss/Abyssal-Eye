@@ -4,7 +4,9 @@ Something is reading your codebase. You can watch it.
 
 Abyssal Eye is a Claude Code plugin that draws a living, Lovecraftian map of what Claude is doing in your project: every class it reads or edits surfaces as a tome, Claude itself is a pyramid with one eye, its tentacles reach into the exact method it writes, and the bindings it creates draw themselves on while you watch. Plainly: it is a visual activity monitor for Claude Code sessions, rendered on one canvas in your browser, fed by the hooks of your own sessions, running entirely on your machine.
 
-![The Abyssal Eye live view, playing the built-in demo](plugin/assets/preview.png)
+Claude Code only (terminal, IDE and the desktop app's Code tab); it does nothing in claude.ai chat or Cowork. The in-app pane is used in the desktop app; elsewhere the view opens in your system browser.
+
+![The Abyssal Eye live view, playing the built-in demo](assets/preview.png)
 
 ## Install
 
@@ -15,11 +17,17 @@ Windows, macOS and Linux. The local server is a small Perl script: on Windows it
 /plugin install abyssal-eye@abyssal-eye
 ```
 
+Or paste this sentence into any Claude Code session and Claude installs it for you:
+
+```
+Install the Claude Code plugin "abyssal-eye" for me: run `claude plugin marketplace add WeWatchFromTheAbyss/Abyssal-Eye`, then `claude plugin install abyssal-eye@abyssal-eye --scope user`, show me the output, and tell me to restart Claude Code.
+```
+
 Pick the user scope so every project gets the view. Restart Claude Code once.
 
 ## First run
 
-- In the desktop app a small "⛧ Abyssal Eye" button appears above the prompt. Pressing it (or running `/abyssal-eye`) submits one short prompt in the chat in your name, "⛧ Open the Abyssal Eye" (its instructions travel as hidden context), and the model opens the view in the built-in browser pane (one tab, reloaded in place if it is already open), answering with a single glyph. Because the request is yours, this works the same in default, accept-edits and auto modes, with no permission rule to add; it costs one short model turn and waits for the current turn to finish. The prompt is not shown on the map. Without a browser pane (a terminal session) the view opens in your system browser instead; `/abyssal-eye browser` always does. A second button, "↗ Open in browser", opens the view in your system browser straight away, and inside the pane the page itself shows a small ↗ control in its lower right corner that does the same.
+- In the desktop app a small "⛧ Abyssal Eye" button appears above the prompt. Pressing it (or running `/abyssal-eye`) sends one short message in your name, "⛧ Open the Abyssal Eye", and attaches instructions Claude reads but the chat does not show: open the view in the browser pane and close extra Abyssal Eye tabs. Claude answers with a single glyph. Because the request is yours, this works the same in default, accept-edits and auto modes, with no permission rule to add; it costs one short model turn and waits for the current turn to finish. The prompt is not shown on the map. Without a browser pane (a terminal session) the view opens in your system browser instead; `/abyssal-eye browser` always does. A second button, "↗ Open in browser", opens the view in your system browser straight away, and inside the pane the page itself shows a small ↗ control in its lower right corner that does the same.
 - The status line shows the view's address, `http://localhost:7311/p/<project>/`. One view per project, fed by every Claude session working in it.
 - `http://localhost:7311/` lists the projects the server knows about.
 - Add `?demo` to a view's address to play a scripted demo session with no Claude involved.
@@ -53,21 +61,30 @@ Members and bindings are extracted with lightweight parsers (no compilers): C#, 
 ## Troubleshooting
 
 - **No button, no status line.** Restart Claude Code after installing. The plugin needs perl: on Windows the one inside Git for Windows (found through CLAUDE_CODE_GIT_BASH_PATH or the usual install folders), elsewhere the system perl; without it the status line says so once.
-- **"could not start its server".** The server is `web/server.pl`, started as `perl server.pl --root <the plugin's web folder> --port 7311 --daemon` (on Windows with Git's `usrinperl.exe`); run that line without `--daemon` to see any error. It needs one free port in 7311 to 7340.
+- **"could not start its server".** The server is `web/server.pl`, started as `perl server.pl --root <the plugin's web folder> --port 7311 --daemon` (on Windows with Git's `usr\bin\perl.exe`); run that line without `--daemon` to see any error. It needs one free port in 7311 to 7340.
 - **The view is empty.** The map grows from Claude's work; nothing is scanned up front. Open it, then give Claude something to do. `?demo` shows what a session looks like.
 - **The pane shows nothing in a hidden tab.** The page pauses its animation while hidden; bring it forward.
 - **Two copies of the plugin** (for example a development copy and the installed one) will fight over a session; the second is refused by the server and goes quiet.
+- **Something else went wrong.** Set ABYSSAL_EYE_LOG=<a file path> and the plugin writes one line per attempt to open the view and per open prompt it saw.
 
 ## What it reads, runs and sends
 
 Everything stays on your machine. There is no telemetry and nothing leaves the computer.
 
-- **Reads**: the transcript of the current session and of its subagents (from the Claude Code projects folder), plus up to 25 earlier transcripts of the same project from the last 14 days, to seed the map with what was touched before. The source files Claude touches are read and analysed (files over about 1.5 MB are skipped) and polled every 4 seconds afterwards so your own edits show up. Prompt excerpts (the first 200 characters) are kept in the local server's memory as part of the event stream, and so are file paths, class and member names.
+- **Reads**: the transcript of the current session and of its subagents (from the Claude Code projects folder). Earlier sessions of the project (up to 25 transcripts from the last 14 days, to seed the map with what was touched before) are read only when you opt in: set ABYSSAL_EYE_HISTORY=1, or press H in the view (remembered per browser, and in abyssal-eye-prefs.json under the Claude config folder once the plugin has seen it). The source files Claude touches are read and analysed (files over about 1.5 MB are skipped) and polled every 4 seconds afterwards so your own edits show up. Prompt excerpts (the first 80 characters) are kept in the local server's memory as part of the event stream, and so are file paths, class and member names.
 - **Runs**: one small Perl server (`web/server.pl`, plain readable source, core modules only) that serves the page and holds the event stream in memory, started detached with no window; on Windows it runs in the Perl that ships with Git for Windows, elsewhere in the system perl. It stays up while sessions talk to it and exits after 10 minutes of silence. It writes nothing to disk but a lock file in the temp folder. The "open in browser" paths use `cmd /c start` on Windows, `open` on macOS and `xdg-open` on Linux.
-- **Listens**: HTTP on loopback only, 127.0.0.1 and [::1], one port in 7311 to 7340. Requests from other machines are refused, and so are cross-site posts from web pages. One exception: the view page itself may POST /open-external (same origin only), which makes the server open the view in your system browser with Start-Process; the address is built by the server from a known project key, never taken from the request. The page also sends a heartbeat every 3 s, POST /seen (same origin only: its instance id, the page version it loaded and whether it is shown), and the plugin reads GET /seen before it asks for the view to be opened, so it can tell whether a live, current, displayed view already exists; the server keeps only the last few seconds of these, in memory.
+- **Listens**: HTTP on loopback only, 127.0.0.1 and [::1], one port in 7311 to 7340. Requests from other machines are refused, and so are cross-site posts from web pages. One exception: the view page itself may POST /open-external (same origin only), which makes the server open the view in your system browser (`cmd /c start` on Windows, `open` on macOS, `xdg-open` on Linux); the address is built by the server from a known project key, never taken from the request. The page also sends a heartbeat every 3 s, POST /seen (same origin only: its instance id, the page version it loaded and whether it is shown), and the plugin reads GET /seen before it asks for the view to be opened, so it can tell whether a live, current, displayed view already exists; the server keeps only the last few seconds of these, in memory.
 - **Sends**: nothing anywhere but to that loopback server, with one exception: once a day the plugin fetches the published plugin manifest from raw.githubusercontent.com (a plain GET of plugin.json, no cookies and no identifying headers, so nothing about you beyond an ordinary HTTPS request) to compare versions; a newer one shows a status line and an Update button, and only your click runs `claude plugin marketplace update abyssal-eye` and `claude plugin update abyssal-eye@abyssal-eye`. Set ABYSSAL_EYE_NO_UPDATE_CHECK=1 to disable the check entirely (Claude Code's CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables it too). The last check and its result are kept in abyssal-eye-update.json under the Claude config folder.
 
 Debug switches on the page (only with `?debug` in the address): `skip=<seconds>` and `noloop` for the demo, `nopause` to keep animating in a hidden tab, `stress=<n>` for a large demo map, and `window.__scope` for the live state.
+
+## Privacy
+
+Everything stays on your machine: the map, the event stream and the prompt excerpts live in the memory of a loopback-only local server and in your browser; nothing is uploaded. The plugin reads your own session transcripts and the source files Claude touches, and earlier transcripts of the project only when you opt in. The only outbound request is the optional daily update check described above, which can be turned off.
+
+## Support
+
+Questions and bug reports: https://github.com/WeWatchFromTheAbyss/Abyssal-Eye/issues
 
 ## License
 

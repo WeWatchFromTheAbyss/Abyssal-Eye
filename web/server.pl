@@ -41,7 +41,11 @@ if ($daemon) {
 }
 
 # one server per machine: sessions that start together may each launch one, and only the first stays
-my $lockPath = File::Spec->catfile(File::Spec->tmpdir, 'abyssal-eye-server.lock');
+# the lock file is the user's own: the runtime dir, else ~/.cache, else the temp dir with the user name in the name
+my $user = $ENV{USER} // $ENV{USERNAME} // 'user'; $user =~ s/[^A-Za-z0-9_.-]/_/g;
+my $lockDir = ($ENV{XDG_RUNTIME_DIR} && -d $ENV{XDG_RUNTIME_DIR}) ? $ENV{XDG_RUNTIME_DIR}
+  : ($ENV{HOME} && -d "$ENV{HOME}/.cache") ? "$ENV{HOME}/.cache" : '';
+my $lockPath = $lockDir ne '' ? File::Spec->catfile($lockDir, 'abyssal-eye-server.lock') : File::Spec->catfile(File::Spec->tmpdir, "abyssal-eye-server-$user.lock");
 open(my $lock, '>>', $lockPath) or exit 0;
 exit 0 unless flock($lock, LOCK_EX | LOCK_NB);
 
@@ -68,6 +72,7 @@ my $version = 'abyssal-eye-server 5';
 my %projects;
 my %seen;
 my %reloadAt;
+my %prefs; # per project: what the view asked for (history => 0|1), read by the plugin
 my $lastPing = time;
 my %types = ('.html' => 'text/html; charset=utf-8', '.js' => 'text/javascript; charset=utf-8', '.css' => 'text/css', '.svg' => 'image/svg+xml', '.png' => 'image/png');
 my $json = JSON::PP->new->utf8;
@@ -144,6 +149,11 @@ sub escapeData { my ($s) = @_; $s =~ s/([^A-Za-z0-9\-_.~])/sprintf('%%%02X', ord
 
 sub project {
   my ($key, $name) = @_;
+  # at most 64 projects are held; past that the one not pushed to for longest goes (its pages refetch when it returns)
+  if (!$projects{$key} && keys(%projects) >= 64) {
+    my ($oldest) = sort { $projects{$a}{last} <=> $projects{$b}{last} } keys %projects;
+    delete $projects{$oldest}; delete $seen{$oldest}; delete $reloadAt{$oldest}; delete $prefs{$oldest};
+  }
   $projects{$key} //= { name => $name, epoch => nowMs(), raw => [], owner => [], sessions => {}, last => time };
   $projects{$key}{name} = $name if defined $name && $name ne '';
   return $projects{$key};
@@ -208,10 +218,13 @@ sub handle {
   if (!isLoopback($peer)) { text($c, 403, 'loopback only'); return }
   my $r = readRequest($c) or return;
   my ($method, $path, $q, $h) = ($r->{method}, $r->{path}, $r->{query}, $r->{headers});
+  # the Host must be this machine's own name for the server: a page on another name could otherwise be pointed at it
+  my $host = lc($h->{host} // ''); $host =~ s/^(\[::1\]|[^:]+)(:\d+)?$/$1/;
+  if ($host ne 'localhost' && $host ne '127.0.0.1' && $host ne '[::1]') { text($c, 403, 'unknown host'); return }
   my $origin = $h->{origin} // '';
   my $ownOrigin = grep { $_ eq $origin } @own;
   # a POST from a web page carries an Origin: only this server's own pages (the view) may post, and only to these
-  if ($method eq 'POST' && $origin ne '' && !($ownOrigin && ($path eq '/open-external' || $path eq '/seen'))) { text($c, 403, 'no cross-site posts'); return }
+  if ($method eq 'POST' && $origin ne '' && !($ownOrigin && ($path eq '/open-external' || $path eq '/seen' || $path eq '/pref'))) { text($c, 403, 'no cross-site posts'); return }
   if ($path eq '/hello') { text($c, 200, $version); return }
   if ($path =~ m{^/p/[^/]+/version$}) { text($c, 200, stamp()); return }
   if ($path eq '/seen') {
@@ -235,6 +248,18 @@ sub handle {
     # the plugin (no Origin) may ask the project's pages to reload on their next heartbeat
     $reloadAt{$key} = nowMs() if $origin eq '' && ($q->{reload} // '') eq '1';
     send_($c, 200, 'application/json', seenJson($key)); return;
+  }
+  if ($path eq '/pref') {
+    # the view's own preferences for the plugin (same origin to set, the plugin to read): history on or off
+    my $key = $q->{p} // '';
+    if ($key eq '' || length($key) > 80) { text($c, 400, 'p is required'); return }
+    if ($method eq 'POST') {
+      if ($origin eq '') { text($c, 400, 'no origin'); return }
+      $prefs{$key} //= {};
+      $prefs{$key}{history} = (($q->{history} // '') eq '1') ? 1 : 0 if defined $q->{history};
+    }
+    my $hist = ($prefs{$key} && $prefs{$key}{history}) ? 1 : 0;
+    send_($c, 200, 'application/json', "{\"history\":$hist}"); return;
   }
   if ($method eq 'POST' && $path eq '/open-external') {
     # the view's own "open in browser" control: the address is built here from a known project key, never taken
