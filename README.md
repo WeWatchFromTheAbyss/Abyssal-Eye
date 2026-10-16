@@ -8,7 +8,7 @@ Abyssal Eye is a Claude Code plugin that draws a living, Lovecraftian map of wha
 
 ## Install
 
-Windows only (the local server is a PowerShell script). In a Claude Code session:
+Windows, macOS and Linux. The local server is a small Perl script: on Windows it runs in the Perl that ships with Git for Windows (which Claude Code needs anyway), on macOS in the system perl, on Linux in the perl package. In a Claude Code session:
 
 ```
 /plugin marketplace add WeWatchFromTheAbyss/Abyssal-Eye
@@ -52,8 +52,8 @@ Members and bindings are extracted with lightweight parsers (no compilers): C#, 
 
 ## Troubleshooting
 
-- **No button, no status line.** The plugin only runs on Windows; elsewhere the status line says so once. Restart Claude Code after installing.
-- **"could not start its server".** The server is `web/server.ps1`, started hidden with `powershell -ExecutionPolicy Bypass`. Run it by hand from the plugin's `web` folder with `-Root <that folder>` to see any error. It needs one free port in 7311 to 7340.
+- **No button, no status line.** Restart Claude Code after installing. The plugin needs perl: on Windows the one inside Git for Windows (found through CLAUDE_CODE_GIT_BASH_PATH or the usual install folders), elsewhere the system perl; without it the status line says so once.
+- **"could not start its server".** The server is `web/server.pl`, started as `perl server.pl --root <the plugin's web folder> --port 7311 --daemon` (on Windows with Git's `usrinperl.exe`); run that line without `--daemon` to see any error. It needs one free port in 7311 to 7340.
 - **The view is empty.** The map grows from Claude's work; nothing is scanned up front. Open it, then give Claude something to do. `?demo` shows what a session looks like.
 - **The pane shows nothing in a hidden tab.** The page pauses its animation while hidden; bring it forward.
 - **Two copies of the plugin** (for example a development copy and the installed one) will fight over a session; the second is refused by the server and goes quiet.
@@ -63,7 +63,7 @@ Members and bindings are extracted with lightweight parsers (no compilers): C#, 
 Everything stays on your machine. There is no telemetry and nothing leaves the computer.
 
 - **Reads**: the transcript of the current session and of its subagents (from the Claude Code projects folder), plus up to 25 earlier transcripts of the same project from the last 14 days, to seed the map with what was touched before. The source files Claude touches are read and analysed (files over about 1.5 MB are skipped) and polled every 4 seconds afterwards so your own edits show up. Prompt excerpts (the first 200 characters) are kept in the local server's memory as part of the event stream, and so are file paths, class and member names.
-- **Runs**: a hidden PowerShell process (`web/server.ps1`, started with `-ExecutionPolicy Bypass`) that serves the page and holds the event stream in memory. It stays up while sessions talk to it and exits after 10 minutes of silence. It never writes to disk.
+- **Runs**: one small Perl server (`web/server.pl`, plain readable source, core modules only) that serves the page and holds the event stream in memory, started detached with no window; on Windows it runs in the Perl that ships with Git for Windows, elsewhere in the system perl. It stays up while sessions talk to it and exits after 10 minutes of silence. It writes nothing to disk but a lock file in the temp folder. The "open in browser" paths use `cmd /c start` on Windows, `open` on macOS and `xdg-open` on Linux.
 - **Listens**: HTTP on loopback only, 127.0.0.1 and [::1], one port in 7311 to 7340. Requests from other machines are refused, and so are cross-site posts from web pages. One exception: the view page itself may POST /open-external (same origin only), which makes the server open the view in your system browser with Start-Process; the address is built by the server from a known project key, never taken from the request. The page also sends a heartbeat every 3 s, POST /seen (same origin only: its instance id, the page version it loaded and whether it is shown), and the plugin reads GET /seen before it asks for the view to be opened, so it can tell whether a live, current, displayed view already exists; the server keeps only the last few seconds of these, in memory.
 - **Sends**: nothing anywhere but to that loopback server, with one exception: once a day the plugin fetches the published plugin manifest from raw.githubusercontent.com (a plain GET of plugin.json, no cookies and no identifying headers, so nothing about you beyond an ordinary HTTPS request) to compare versions; a newer one shows a status line and an Update button, and only your click runs `claude plugin marketplace update abyssal-eye` and `claude plugin update abyssal-eye@abyssal-eye`. Set ABYSSAL_EYE_NO_UPDATE_CHECK=1 to disable the check entirely (Claude Code's CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables it too). The last check and its result are kept in abyssal-eye-update.json under the Claude config folder.
 

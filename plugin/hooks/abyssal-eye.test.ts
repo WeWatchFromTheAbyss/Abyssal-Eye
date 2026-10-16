@@ -421,3 +421,9 @@ test('the update check compares versions numerically and reads a manifest', () =
   expect(versionFromManifest('not json')).toBe(undefined)
   expect(versionFromManifest('{"version":7}')).toBe(undefined)
 })
+
+test('a project folder is slugged the way Claude Code names its transcript folders, on every platform', () => {
+  expect(projectSlug('/Users/someone/proj')).toBe('-Users-someone-proj')
+  expect(projectSlug('/home/someone/my.app')).toBe('-home-someone-my-app')
+  expect(projectSlug('C:\\Projects\\Example')).toBe('C--Projects-Example')
+})

@@ -3,6 +3,6 @@
   "displayName": "Abyssal Eye",
   "author": { "name": "Abyssal Eye contributors" },
   "license": "MIT",
-  "version": "0.7.17",
+  "version": "0.8.1",
   "description": "A living Lovecraftian map of your codebase: watch Claude's tentacles write and eye stalks read, see new bindings form, and rewind history."
 }

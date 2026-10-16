@@ -23,7 +23,14 @@ let connecting = false
 let lastOpen = 0 // when the button last opened the view
 let lastBudget = -1 // context tokens used at the last budget event
 let openLog = '' // set ABYSSAL_EYE_LOG to a file path to record how each attempt to open the view went
-let unsupported = false // not Windows: the local server is a PowerShell script
+let unsupported = false // no perl on this machine: the local server cannot run
+let perlExe = 'perl' // the perl that runs the server (Git for Windows' on Windows, the system one elsewhere)
+let platform: 'win32' | 'darwin' | 'linux' = 'win32' // where this runs: the server script and the browser opener follow it
+/** The system browser on this platform, with the address given. */
+function openExternal($: { process: { run: (argv: readonly string[]) => Promise<unknown> } }, u: string): Promise<unknown> {
+  const argv = platform === 'win32' ? ['cmd', '/c', 'start', '', u] : platform === 'darwin' ? ['open', u] : ['xdg-open', u]
+  return $.process.run(argv).catch(() => undefined)
+}
 const MAX_FILE = 1_500_000 // source files larger than this are not analysed
 let passiveUntil = 0 // another copy of this plugin streams this session until then
 const project = { key: '', name: '' }
@@ -191,13 +198,33 @@ function short(s: string, n: number): string {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    // Windows only: the local server is a PowerShell script; elsewhere the plugin says so once and does nothing
-    const os = (await $.env.get('OS').catch(() => undefined)) || ''
-    if (!/^Windows/i.test(os) && !(await $.env.get('SYSTEMROOT').catch(() => undefined))) {
+    // the platform decides where perl is and how the browser opens; the server is the same perl script everywhere
+    const nodePlatform = (globalThis as { process?: { platform?: string } }).process?.platform
+    const osEnv = (await $.env.get('OS').catch(() => undefined)) || ''
+    const win = nodePlatform ? nodePlatform === 'win32' : (/^Windows/i.test(osEnv) || !!(await $.env.get('SYSTEMROOT').catch(() => undefined)))
+    if (win) platform = 'win32'
+    else if (nodePlatform === 'darwin' || nodePlatform === 'linux') platform = nodePlatform
+    else { const u = await $.process.run(['/bin/sh', '-c', 'uname -s']).catch(() => undefined); platform = u && /darwin/i.test(u.stdout) ? 'darwin' : 'linux' }
+    // perl: on Windows the one Git for Windows ships (Claude Code needs Git for Windows), found from
+    // CLAUDE_CODE_GIT_BASH_PATH or the usual install folders, else on the PATH; elsewhere the system perl
+    const exists = async (p: string) => !!(await $.fs.stat(p).catch(() => undefined))
+    let found = ''
+    if (platform === 'win32') {
+      const bash = (await $.env.get('CLAUDE_CODE_GIT_BASH_PATH').catch(() => undefined)) || ''
+      const candidates: string[] = []
+      const m = /^(.*?)[\\/](?:usr[\\/])?bin[\\/]bash\.exe$/i.exec(bash)
+      if (m) candidates.push(m[1] + '\\usr\\bin\\perl.exe')
+      const local = (await $.env.get('LOCALAPPDATA').catch(() => undefined)) || ''
+      candidates.push('C:\\Program Files\\Git\\usr\\bin\\perl.exe', 'C:\\Program Files (x86)\\Git\\usr\\bin\\perl.exe', ...(local ? [local + '\\Programs\\Git\\usr\\bin\\perl.exe'] : []))
+      for (const c of candidates) { if (await exists(c)) { found = c; break } }
+      if (!found && await $.process.run(['perl', '-e', '1']).then(r => r.exitCode === 0, () => false)) found = 'perl'
+    } else if (await $.process.run(['/bin/sh', '-c', 'command -v perl']).then(r => r.exitCode === 0, () => false)) found = 'perl'
+    if (!found) {
       unsupported = true
-      $.ui.status('⛧ Abyssal Eye needs Windows (PowerShell)')
+      $.ui.status(platform === 'win32' ? '⛧ Abyssal Eye needs perl (Git for Windows provides it)' : '⛧ Abyssal Eye needs perl 5 (the system perl on macOS, the perl package on Linux)')
       return next(e)
     }
+    perlExe = found
     // one view per project: the repository's root, else the session's project root
     const repo = await $.session.repo().catch(() => null)
     tr.root = (repo?.root || (await $.session.root().catch(() => '')) || (await $.session.cwd().catch(() => ''))) || '.'
@@ -324,11 +351,11 @@ export const register: Register = on => {
     await $.command.register({ name: 'abyssal-eye', description: 'Open the Abyssal Eye live view in the browser pane (/abyssal-eye browser: system browser)' })
 
     // one server for every session on the machine: find it, or start it detached so it outlives this session
-    const web = $.plugin.root.replace(/[\\/]+$/, '') + '\\web'
+    const web = $.plugin.root.replace(/[\\/]+$/, '') + (platform === 'win32' ? '\\web' : '/web')
     const find = async (): Promise<number> => {
       for (let p = BASE_PORT; p < BASE_PORT + 30; p++) {
         const r = await $.http.fetch('http://127.0.0.1:' + p + '/hello').catch(() => undefined)
-        if (r?.ok && r.text.startsWith('abyssal-eye-server 4')) return p
+        if (r?.ok && r.text.startsWith('abyssal-eye-server 5')) return p
       }
       return 0
     }
@@ -338,10 +365,9 @@ export const register: Register = on => {
       try {
         let p = await find()
         if (!p) {
-          const ps1 = (web + '\\server.ps1').replace(/'/g, "''"), root = web.replace(/'/g, "''")
-          await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
-            `Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','"${ps1}"','-Root','"${root}"','-Port','${BASE_PORT}'`])
-            .catch(() => undefined)
+          // the perl server, started as a daemon: the call returns at once and the server outlives this session
+          const sep = platform === 'win32' ? '\\' : '/'
+          await $.process.run([perlExe, web + sep + 'server.pl', '--root', web, '--port', String(BASE_PORT), '--daemon']).catch(() => undefined)
           for (let i = 0; i < 20 && !p; i++) { await $.clock.sleep(500); p = await find() }
         }
         if (p) {
@@ -425,7 +451,7 @@ export const register: Register = on => {
           openWatch = 0; setOpening(false)
           if (st.alive >= 1) return
           $.ui.status('⛧ Abyssal Eye (system browser: the pane showed no view)')
-          void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+          void openExternal($, url)
         }
       })
     })
@@ -462,11 +488,11 @@ export const register: Register = on => {
 
   // open the view: in the desktop app's browser pane when this session has it, else the system browser
   on('command.run', { command: 'abyssal-eye' }, async ($, e) => {
-    if (unsupported) return { text: 'Abyssal Eye needs Windows (PowerShell).' }
+    if (unsupported) return { text: 'Abyssal Eye needs perl (Git for Windows provides it on Windows; macOS ships it).' }
     if (!url) return { text: 'Abyssal Eye is still waking; try again in a moment.' }
     const why = e.args.trim() === 'browser' ? 'asked for the system browser' : await openInPane($)
     if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' /abyssal-eye: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
-    if (why) await $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+    if (why) await openExternal($, url)
     return { text: 'Abyssal Eye: ' + url + (why ? ' (system browser: ' + why + ')' : ' (opening in the browser pane)') }
   })
 
@@ -483,13 +509,13 @@ export const register: Register = on => {
             if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' button: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
             if (!why) return
             $.ui.status('⛧ Abyssal Eye (system browser: ' + why + ')')
-            void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+            void openExternal($, url)
           })
         }} />
         <Button key="open-external" label="↗ Open in browser" plain dimColor onPress={() => {
           if (Date.now() - lastOpen < 2000) return
           lastOpen = Date.now()
-          void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+          void openExternal($, url)
         }} />
         {updateAvail ? <Button key="update" label={updating ? '⛧ updating…' : '⬆ Update to ' + updateAvail} plain dimColor onPress={() => {
           // the only path that updates: the person's click runs the marketplace refresh, then the plugin update
