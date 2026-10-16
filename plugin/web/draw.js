@@ -489,6 +489,7 @@ function snakeSpine(L, st, now) {
 // ---------- camera ----------
 
 function cameraFollow(dt, now) {
+  if (!(view.w >= 2 && view.h >= 2)) { view.framed = false; return } // a collapsed pane frames nothing
   const user = now < view.userUntil
   const cam = view.cam
   if (!user) {
@@ -536,9 +537,11 @@ let g = ctx
 function resize() {
   const dprCap = Q() === 0 ? 1 : Q() === 1 ? 1.5 : 2
   view.dpr = Math.min(window.devicePixelRatio || 1, dprCap)
-  if (window.innerWidth < 2 || window.innerHeight < 2) return // collapsed or hidden: keep the last real size
+  const w = window.innerWidth, h = window.innerHeight
+  if (!(w >= 2 && h >= 2)) { view.framed = false; return } // collapsed or hidden: keep the last real size, frame afresh later
   if (view.w < 2 || view.h < 2) view.framed = false // the first real size gets an immediate framing
-  view.w = window.innerWidth; view.h = window.innerHeight
+  if (w === view.w && h === view.h && canvas.width === Math.round(w * view.dpr)) return
+  view.w = w; view.h = h
   canvas.width = Math.round(view.w * view.dpr); canvas.height = Math.round(view.h * view.dpr)
   cardCache.clear()
 }
@@ -904,7 +907,7 @@ function arrows(Mg, col, a) {
 // a connection's width grows slowly with the bindings it carries, to a low ceiling
 function widthOf(Mg) { return Math.min(3, 1 + 0.9 * Math.log2(Mg.n)) }
 // how visible a connection's end is: a piled tome's pile is dim, a folded or faded card dims too
-function visOf(V) { return V.pileOf ? 0.4 : (V.dim === undefined ? 1 : V.dim) * (V.tFold ? 0.7 : 1) }
+function visOf(V) { if (V.taint > 0) return 1; return V.pileOf ? 0.4 : (V.dim === undefined ? 1 : V.dim) * (V.tFold ? 0.7 : 1) }
 const FADE_LV = [1, 0.5, 0.28], EDGE_DIM = '#9A917A', EDGEX_DIM = '#A8976E'
 function fadeInk(fb, cross) { return fb ? (cross ? EDGEX_DIM : EDGE_DIM) : (cross ? EDGEX : EDGE) }
 // a connection whose ends sit on one spot (or whose attachments are unset) is skipped rather than drawn wrongly

@@ -105,6 +105,12 @@ const DEMO = /[?&]demo/.test(location.search)
 // animating in a hidden tab), stress=N (a large pre-existing demo map), and window.__scope (the live state)
 const DEBUG = /[?&]debug/.test(location.search)
 const src = { epoch: null, seq: 0, inflight: false, retryAt: 0 }
+// loading: until the stream held by the server has all arrived the scene stays off screen behind the waiting plate
+// (folded and settled meanwhile), then it is revealed in one fade. total comes with each /events answer; got is
+// how many of those lines are here. The demo plays straight away.
+const load = { active: !/[?&]demo/.test(location.search), got: 0, total: -1, reveal: 0, doneAt: 0 }
+function loadReset() { load.active = !DEMO; load.got = 0; load.total = -1; load.reveal = 0 }
+function loadDone() { load.active = false; load.doneAt = performance.now(); view.needSettle = true; view.framed = false }
 
 // A scripted session that loops forever: same shape as the server, so the page code path is identical.
 function demoScript() {
@@ -397,8 +403,9 @@ function demoPoll(since) {
 
 function onBatch(res) {
   if (!res || typeof res.epoch !== 'number' || !Array.isArray(res.events)) return
-  if (src.epoch !== null && res.epoch !== src.epoch) { resetAll(); src.seq = 0; src.epoch = res.epoch; return }
+  if (src.epoch !== null && res.epoch !== src.epoch) { resetAll(); src.seq = 0; src.epoch = res.epoch; loadReset(); return }
   src.epoch = res.epoch
+  if (typeof res.total === 'number') load.total = res.total
   let got = 0
   for (let i = 0; i < res.events.length; i++) {
     const e = res.events[i]
@@ -406,6 +413,9 @@ function onBatch(res) {
   }
   // a batch this large is a replay (a fresh page, a reconnect, a server restart), shown settled, not animated in
   if (got >= 40) view.needSettle = true
+  load.got = src.seq
+  // everything the server holds is here (or it holds nothing): the map can be shown
+  if (load.active && load.total >= 0 && src.seq >= load.total) loadDone()
 }
 
 // polling recovers on its own: failures back off (1 s up to 10 s), success resets; a new epoch after a server
@@ -416,7 +426,7 @@ function poll() {
   src.inflight = true
   fetch('events?since=' + src.seq, { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json() })
     .then(res => { src.inflight = false; src.backoff = 0; onBatch(res) })
-    .catch(() => { src.inflight = false; src.backoff = Math.min(10000, (src.backoff || 500) * 2); src.retryAt = performance.now() + src.backoff })
+    .catch(() => { src.inflight = false; src.backoff = Math.min(10000, (src.backoff || 150) * 2); src.retryAt = performance.now() + src.backoff })
 }
 
 // ---------- history: every event kept, state at T is the fold of events with t <= T ----------
@@ -695,13 +705,25 @@ function spawnNode(S, n) {
 }
 
 // which acts are current or lingering per actor, and which rows are being worked on
-const focus = { rows: new Map(), cur: new Map(), burst: new Set(), nodeEdit: new Map(), lastEdit: new Map(), pull: new Map(), zaps: [], lastT: 0 }
+// the taint: an edited tome stays undulating, unfaded and crackling for TAINT_MS after the edit ends, dying out
+// over the last TAINT_FADE; the window runs from the edit's end, or from its arrival when the batch came late
+const TAINT_MS = 15000, TAINT_FADE = 4000
+const focus = { taint: new Map(), rows: new Map(), cur: new Map(), burst: new Set(), nodeEdit: new Map(), lastEdit: new Map(), pull: new Map(), zaps: [], lastT: 0 }
 const zapped = new Set()
 function collectActs(S, T) {
-  focus.rows.clear(); focus.cur.clear(); focus.burst.clear(); focus.nodeEdit.clear(); focus.lastEdit.clear(); focus.pull.clear()
+  focus.rows.clear(); focus.cur.clear(); focus.burst.clear(); focus.nodeEdit.clear(); focus.lastEdit.clear(); focus.pull.clear(); focus.taint.clear()
   for (const act of S.acts.values()) {
     if (act.startT > T) continue
     const ended = act.endT > 0
+    // the taint of a finished edit, strongest of the edits on a tome, tinted by who made it
+    if (ended && act.node && (act.kind === 'edit' || act.kind === 'write') && !act.failed) {
+      const s = since(act, T)
+      if (s >= 0 && s < TAINT_MS) {
+        const k = s < TAINT_MS - TAINT_FADE ? 1 : (TAINT_MS - s) / TAINT_FADE
+        const prev = focus.taint.get(act.node)
+        if (!prev || k > prev.k) { const top = topOf(S, act.actor), A = vis.actors.get(top); focus.taint.set(act.node, { k, member: act.member || '', col: top !== act.actor ? THRALL : (A && A.hue ? A.hue : EMBER) }) }
+      }
+    }
     // an editing burst: recent edits keep a tentacle on each file they touched
     if ((act.kind === 'edit' || act.kind === 'write') && act.node && T - Math.max(act.startT, act.endT) < BURST_MS) {
       const prev = focus.nodeEdit.get(act.node)

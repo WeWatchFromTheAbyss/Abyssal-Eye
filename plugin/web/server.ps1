@@ -4,7 +4,9 @@
 # One plugin instance owns a session's stream at a time (a second copy of the plugin in the same session is refused).
 # Exits once no session has pushed or pinged for a while.
 # Loopback only: any client that is not this machine is refused, and a POST carrying an Origin header (a web page
-# rather than the plugin) is refused, so no site in a browser can push into or read a stream.
+# rather than the plugin) is refused, so no site in a browser can push into or read a stream. The view's own pages
+# (same origin) may POST /open-external and their heartbeat /seen; the plugin reads GET /seen to learn what pages
+# are alive, shown and current before it asks for the view to be opened.
 param([string]$Root, [int]$Port = 7311)
 
 # one server per machine: sessions that start together may each launch one, and only the first stays
@@ -63,6 +65,34 @@ function Project([string]$key, [string]$name) {
 
 function Html([string]$s) { return [Net.WebUtility]::HtmlEncode($s) }
 
+# the page's version token: changes whenever the page's files change, so open pages can reload themselves
+function Stamp() {
+  $stamp = 0
+  foreach ($f in 'index.html', 'core.js', 'layout.js', 'draw.js', 'main.js') { $fp = Join-Path $Root $f; if (Test-Path $fp) { $stamp += (Get-Item $fp).LastWriteTimeUtc.Ticks } }
+  return [string]$stamp
+}
+# heartbeats: each open page of a project reports every few seconds (its instance id, the version it loaded, whether
+# it is shown); only pages seen within 10 s count as alive
+$seen = @{}
+$reloadAt = @{} # project key -> when the plugin last asked the project's displayed pages to reload themselves
+function SeenJson([string]$key) {
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $alive = 0; $vis = 0; $cur = 0; $latest = 0
+  $stamp = Stamp
+  if ($seen.ContainsKey($key)) {
+    foreach ($id in @($seen[$key].Keys)) {
+      $h = $seen[$key][$id]
+      if ($now - $h.t -gt 10000) { $seen[$key].Remove($id); continue }
+      $alive++
+      if ($h.vis -eq '1') { $vis++ }
+      if ($h.v -eq $stamp) { $cur++ }
+      if ($h.t -gt $latest) { $latest = $h.t }
+    }
+  }
+  $epoch = 0; if ($projects.ContainsKey($key)) { $epoch = $projects[$key].epoch }
+  return '{"alive":' + $alive + ',"visible":' + $vis + ',"current":' + $cur + ',"latest":' + $latest + ',"version":"' + $stamp + '","epoch":' + $epoch + '}'
+}
+
 function Index() {
   $rows = ''
   foreach ($k in ($projects.Keys | Sort-Object { $projects[$_].last } -Descending)) {
@@ -90,16 +120,44 @@ while ($listener.IsListening) {
   try {
     $req = $ctx.Request
     if (-not $req.RemoteEndPoint -or -not [Net.IPAddress]::IsLoopback($req.RemoteEndPoint.Address)) { Text $ctx 403 'loopback only'; continue }
-    if ($req.HttpMethod -eq 'POST' -and $req.Headers['Origin']) { Text $ctx 403 'no cross-site posts'; continue }
+    # a POST from a web page carries an Origin: only this server's own pages (the view) may post, and only to /open-external
+    $origin = [string]$req.Headers['Origin']
+    $own = @("http://localhost:$Port", "http://127.0.0.1:$Port", "http://[::1]:$Port")
+    if ($req.HttpMethod -eq 'POST' -and $origin -and -not ($own -contains $origin -and ($req.Url.AbsolutePath -eq '/open-external' -or $req.Url.AbsolutePath -eq '/seen'))) { Text $ctx 403 'no cross-site posts'; continue }
     $path = $req.Url.AbsolutePath
     $q = $req.QueryString
     if ($path -eq '/hello') {
       Text $ctx 200 $version
     } elseif ($path -match '^/p/[^/]+/version$') {
       # changes whenever the page's files change, so open pages can reload themselves
-      $stamp = 0
-      foreach ($f in 'index.html', 'core.js', 'layout.js', 'draw.js', 'main.js') { $fp = Join-Path $Root $f; if (Test-Path $fp) { $stamp += (Get-Item $fp).LastWriteTimeUtc.Ticks } }
-      Text $ctx 200 ([string]$stamp)
+      Text $ctx 200 (Stamp)
+    } elseif ($path -eq '/seen') {
+      $key = [string]$q['p']
+      if (-not $key -or $key.Length -gt 80) { Text $ctx 400 'p is required'; continue }
+      if ($req.HttpMethod -eq 'POST') {
+        # a page's heartbeat (same origin only, enforced above); the answer carries the current version and epoch
+        $id = [string]$q['i']
+        if (-not $origin -or -not $id -or $id.Length -gt 16) { Text $ctx 400 'i is required'; continue }
+        if (-not $seen.ContainsKey($key)) { $seen[$key] = @{} }
+        if ($seen[$key].Count -ge 32 -and -not $seen[$key].ContainsKey($id)) { Text $ctx 429 'too many pages'; continue }
+        $prevT = 0; if ($seen[$key].ContainsKey($id)) { $prevT = $seen[$key][$id].t }
+        $seen[$key][$id] = @{ t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); v = [string]$q['v']; vis = [string]$q['vis'] }
+        # a reload asked for since this page last reported is handed to it once
+        $doReload = $reloadAt.ContainsKey($key) -and $reloadAt[$key] -gt $prevT -and ($seen[$key][$id].t - $reloadAt[$key]) -lt 20000
+        $json = SeenJson $key
+        if ($doReload) { $json = $json.Substring(0, $json.Length - 1) + ',"reload":1}' }
+        Send $ctx 200 'application/json' $utf8.GetBytes($json); continue
+      }
+      # the plugin (no Origin) may ask the project's pages to reload on their next heartbeat
+      if (-not $origin -and [string]$q['reload'] -eq '1') { $reloadAt[$key] = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+      Send $ctx 200 'application/json' $utf8.GetBytes((SeenJson $key))
+    } elseif ($req.HttpMethod -eq 'POST' -and $path -eq '/open-external') {
+      # the view's own "open in browser" control: the address is built here from a known project key, never taken
+      # from the request, and handed to the system browser
+      $key = [string]$q['p']
+      if (-not $origin -or -not $key -or -not $projects.ContainsKey($key)) { Text $ctx 400 'unknown project'; continue }
+      Start-Process ("http://localhost:$Port/p/" + [Uri]::EscapeDataString($key) + "/")
+      Text $ctx 200 'opened'
     } elseif ($req.HttpMethod -eq 'POST' -and ($path -eq '/push' -or $path -eq '/ping')) {
       $key = [string]$q['p']; $sid = [string]$q['s']; $inst = [string]$q['i']
       if (-not $key -or -not $sid -or -not $inst) { Text $ctx 400 'p, s and i are required'; continue }
@@ -151,14 +209,14 @@ while ($listener.IsListening) {
       Text $ctx 200 ([string]$pr.raw.Count)
     } elseif ($path -match '^/p/([^/]+)/events$') {
       $pr = $projects[$Matches[1]]
-      if (-not $pr) { Send $ctx 200 'application/json' $utf8.GetBytes('{"epoch":0,"events":[]}'); continue }
+      if (-not $pr) { Send $ctx 200 'application/json' $utf8.GetBytes('{"epoch":0,"total":0,"events":[]}'); continue }
       $since = 0
       [long]::TryParse($q['since'], [ref]$since) | Out-Null
       # an event's seq is its position in the stream, 1..n, so the first one past since is at index since
       $lo = [int][Math]::Max(0, [Math]::Min($since, $pr.raw.Count))
       $n = [Math]::Min($pr.raw.Count - $lo, 2000)
       $sb = New-Object System.Text.StringBuilder
-      [void]$sb.Append('{"epoch":').Append($pr.epoch).Append(',"events":[')
+      [void]$sb.Append('{"epoch":').Append($pr.epoch).Append(',"total":').Append($pr.raw.Count).Append(',"events":[')
       for ($k = $lo; $k -lt $lo + $n; $k++) {
         if ($k -gt $lo) { [void]$sb.Append(',') }
         [void]$sb.Append('{"seq":').Append($k + 1).Append(',').Append($pr.raw[$k], 1, $pr.raw[$k].Length - 1)

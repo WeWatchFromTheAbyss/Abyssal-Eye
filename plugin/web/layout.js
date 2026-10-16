@@ -80,17 +80,20 @@ function syncNodes(S, T) {
     V.shake = ease(V.shake || 0, 0, 5, 1 / 60)
     V.lastTouch = touch
     const hov = view.hover === V
-    V.tDim = hov ? 1 : 1 - 0.75 * smooth((idle - 600000) / 1200000)
+    const tn = focus.taint.get(n.id)
+    V.taint = tn ? tn.k : 0; if (tn) { V.taintCol = tn.col; V.taintRow = tn.member }
+    // tainted: no fading, folding or piling while the taint lasts
+    V.tDim = hov || V.taint > 0 ? 1 : 1 - 0.75 * smooth((idle - 600000) / 1200000)
     // a crowded map folds and piles its quiet tomes sooner: with hundreds of tomes present, a few idle minutes suffice
     const foldK = clamp(40 / Math.max(1, vis.presentN || 0), 0.1, 1)
-    V.tFold = idle > 600000 * foldK ? 1 : 0
-    V.tPile = !gone && idle > 900000 * foldK ? 1 : 0
+    V.tFold = idle > 600000 * foldK && !V.taint ? 1 : 0
+    V.tPile = !gone && idle > 900000 * foldK && !V.taint ? 1 : 0
     if (V.pin) { V.tPile = 0 }
     if (V.tPile) V.alive = false
     V.name = n.name; V.kind = n.kind; V.file = n.file; V.lines = n.lines
     V.short = shortOf(n.id, n.name)
     if (V.pin === undefined) V.pin = pins.map.get(n.id) || null
-    const tWob = motion() > 0.02 ? (editing.has(n.id) ? 1 : T - n.editT < 1500 ? 0.6 : 0) : 0
+    const tWob = motion() > 0.02 ? (editing.has(n.id) ? 1 : T - n.editT < 1500 ? 0.6 : V.taint > 0 ? 0.25 * V.taint : 0) : 0
     const nowZ = performance.now()
     for (let zi = 0; zi < focus.zaps.length; zi++) {
       const zp = focus.zaps[zi]

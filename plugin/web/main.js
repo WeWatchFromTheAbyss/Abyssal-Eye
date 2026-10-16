@@ -91,6 +91,7 @@ function drawTomes(now) {
       if (ry + ROW_H > y + h) break
       if (r.f > 0.02) { g.fillStyle = rgba(r.e >= r.r && r.e > 0.02 ? EMBER : CYAN, Math.min(1, r.f * (0.28 + 0.3 * pulse) + 0.5 * shk * r.e)); g.fillRect(x + 10, ry, w - 14, ROW_H) }
       if (r.e > 0.02 && V.wob > 0.02) { g.strokeStyle = rgba(ICHOR, 0.5 * V.wob * r.e); g.lineWidth = 1.2; wobblePath(x + 10, ry, w - 14, ROW_H, 1.6 * V.wob, now, V.seed || 0); g.stroke() }
+      if (V.taint > 0.02 && V.zap < 0.3 && V.taintRow === r.name) { g.fillStyle = rgba(V.taintCol || EMBER, 0.1 * V.taint); g.fillRect(x + 10, ry, w - 14, ROW_H) }
       if (V.zap > 0.02 && V.zapRow === r.name) { g.fillStyle = rgba(V.zapCol || EMBER, 0.22 * V.zap); g.fillRect(x + 10, ry, w - 14, ROW_H); zapRect(x + 10, ry, w - 14, ROW_H, now, (V.seed || 0) + 3, V.zapCol || EMBER, V.zap, z, 2) }
       else if (r.e > 0.02) { g.fillStyle = rgba(EMBER, r.e * 0.3); g.fillRect(x + 10, ry, w - 14, ROW_H) }
       else if (r.r > 0.02) { g.fillStyle = rgba(CYAN, r.r * 0.22); g.fillRect(x + 10, ry, w - 14, ROW_H) }
@@ -101,6 +102,8 @@ function drawTomes(now) {
       g.fillStyle = rgba(ICHOR, 0.16 * V.wob); g.strokeStyle = rgba(EMBER, (0.3 + 0.6 * V.hEdit) * V.wob + 0.2 * (1 - V.wob) * V.hEdit); g.lineWidth = 2
       wobblePath(x - 3, y - 3, w + 6, h + 6, 4 * V.wob, now, V.seed || 0); g.fill(); g.stroke()
       if (V.zap > 0.02) zapRect(x - 3, y - 3, w + 6, h + 6, now, V.seed || 0, V.zapCol || EMBER, V.zap, z, 4)
+      // the taint: a recent edit keeps the frame crackling, sparse and dim, dying out over the last seconds
+      else if (V.taint > 0.02 && q >= 1 && mo > 0.02 && rnd(V.id, Math.floor(now / 140)) < 0.3 + 0.25 * V.taint) zapRect(x - 3, y - 3, w + 6, h + 6, now, (V.seed || 0) + 5, V.taintCol || EMBER, 0.32 * V.taint, z, 2.5)
     } else if (V.hEdit > 0.02) { g.strokeStyle = rgba(EMBER, 0.2 + 0.8 * V.hEdit); g.lineWidth = 2; g.beginPath(); roundRect(x - 3, y - 3, w + 6, h + 6, 5); g.stroke() }
     if (V.hExt > 0.02) { g.strokeStyle = rgba(VIOLET, 0.2 + 0.8 * V.hExt); g.lineWidth = 2; g.beginPath(); roundRect(x - 5, y - 5, w + 10, h + 10, 6); g.stroke() }
     if (V.hFresh > 0.02) { g.strokeStyle = rgba(GREEN, V.hFresh * (0.5 + 0.5 * pulse)); g.lineWidth = 2.4; g.beginPath(); roundRect(x - 7, y - 7, w + 14, h + 14, 8); g.stroke() }
@@ -1083,6 +1086,57 @@ function rebuildTicks(t0, t1) {
 // and set on a slightly uneven baseline (fixed per letter), sigils either side, a faint smoky glow, and a very
 // slow breathing shimmer. It steps back to 40% when the map's content sits underneath it.
 const TITLE_FONT = 'Georgia, "Palatino Linotype", "Book Antiqua", serif'
+// before the first event arrives (a fresh pane, a thumbnail taken right after load): the glyph, the name, and the
+// well, so the first frame already looks like the view rather than a dark sheet
+function drawAwaiting(now, alpha) {
+  const q = Q(), mo = motion()
+  g.setTransform(view.dpr, 0, 0, view.dpr, 0, 0)
+  const cx = view.w / 2, cy = view.h * 0.56, R = Math.min(view.w, view.h) * 0.3
+  g.save()
+  g.globalAlpha = alpha
+  if (alpha < 1) { g.fillStyle = VOID; g.fillRect(0, 0, view.w, view.h) }
+  g.globalAlpha = alpha
+  for (let k = 5; k >= 0; k--) {
+    const u = k / 5, r = R * (0.18 + 0.82 * u)
+    g.strokeStyle = rgba(VIOLET, 0.06 + 0.12 * (1 - u)); g.lineWidth = 1 + (1 - u) * 1.5
+    g.beginPath(); g.ellipse(cx, cy, r, r * 0.42, 0, 0, Math.PI * 2); g.stroke()
+  }
+  const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R * 0.5)
+  gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)')
+  g.fillStyle = gr; g.beginPath(); g.ellipse(cx, cy, R * 0.5, R * 0.21, 0, 0, Math.PI * 2); g.fill()
+  const fs = clamp(Math.round(view.w / 30), 20, 40)
+  const breathe = 0.5 + 0.5 * Math.sin(now * 0.0006) * mo
+  g.textAlign = 'center'; g.textBaseline = 'alphabetic'
+  if (q >= 1) { g.shadowColor = 'rgba(110,80,150,' + (0.45 + 0.25 * breathe).toFixed(2) + ')'; g.shadowBlur = 14 + 8 * breathe }
+  g.font = '600 ' + fs + 'px ' + TITLE_FONT; g.fillStyle = BONE; g.globalAlpha = 0.85 + 0.15 * breathe
+  g.fillText('ABYSSAL EYE', cx, fs * 1.55)
+  g.shadowBlur = 0
+  // the loader: a slow spiral of fading dots, brass at the heart turning violet outward, under the title; while
+  // the stream is still arriving a thin arc round it fills with the share received
+  const lx = cx, ly = fs * 1.55 + 46, turn = now * 0.0025 * Math.max(0.3, mo)
+  for (let i = 0; i < 30; i++) {
+    const t = i / 29, a = turn + i * 0.46, r = 2.5 + t * 16
+    const c = rgb(BRASS), v = rgb(VIOLET)
+    const col = [c[0] + (v[0] - c[0]) * t, c[1] + (v[1] - c[1]) * t, c[2] + (v[2] - c[2]) * t]
+    g.fillStyle = rgbaArr(col, (1 - t * 0.85) * alpha); g.beginPath(); g.arc(lx + Math.cos(a) * r, ly + Math.sin(a) * r, 1.2 + (1 - t) * 1.1, 0, Math.PI * 2); g.fill()
+  }
+  if (load.active) {
+    g.strokeStyle = rgba(VIOLET, 0.18 * alpha); g.lineWidth = 1; g.beginPath(); g.arc(lx, ly, 22, 0, Math.PI * 2); g.stroke()
+    const frac = load.total > 0 ? clamp(load.got / load.total, 0, 1) : -1
+    g.strokeStyle = rgba(BRASS, 0.8 * alpha); g.lineWidth = 1.6; g.lineCap = 'round'; g.beginPath()
+    if (frac >= 0) g.arc(lx, ly, 22, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2)
+    else { const s = now * 0.003; g.arc(lx, ly, 22, s, s + 1.2) }
+    g.stroke()
+  }
+  // a small pentagram either side of the name (drawn, so no font is needed for it)
+  const half = g.measureText('ABYSSAL EYE').width / 2 + fs * 0.75
+  g.strokeStyle = rgba(BONE, 0.7); g.lineWidth = 1.2
+  for (const sx of [cx - half, cx + half]) { g.stroke(new Path2D(pentaPath(sx, fs * 1.2, fs * 0.32, now * 0.0003 * mo))); g.beginPath(); g.arc(sx, fs * 1.2, fs * 0.32, 0, Math.PI * 2); g.stroke() }
+  g.shadowBlur = 0; g.globalAlpha = 0.6
+  g.font = '12px ' + FONT; g.fillStyle = ASH
+  g.fillText(load.active ? (load.total > 0 ? 'gathering ' + load.got + ' of ' + load.total : 'reaching for the stream') : DEMO ? 'the demo is stirring' : 'waiting for a session to stir', cx, cy + R * 0.6)
+  g.restore()
+}
 function drawTitle(now) {
   const root = H.state.root || ''
   if (!root) return
@@ -1254,12 +1308,20 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'm' || e.key === 'M') { settings.m = (settings.m + 1) % 3; saveSettings(); showHint('motion: ' + MOT[settings.m]) }
 })
 window.addEventListener('resize', resize)
+// the pane may open collapsed or hidden and gain its size later: every change of size (and every return to view)
+// resizes the canvas, and the first real size frames the map
+if (typeof ResizeObserver === 'function') { try { new ResizeObserver(() => { if (window.innerWidth >= 2 && window.innerHeight >= 2) wake(); else resize() }).observe(document.documentElement) } catch (e) { /* no observer */ } }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) resize() })
 
 // ---------- main loop ----------
 
 const NOPAUSE = DEBUG && /[?&]nopause/.test(location.search)
 let last = 0, rafId = 0, pollAt = 0
 function schedule() { rafId = NOPAUSE ? setTimeout(() => frame(performance.now()), 16) : requestAnimationFrame(frame) }
+// a pane that is open but not shown gets no animation frames at all (and reports a 0 by 0 window, not hidden):
+// a watchdog keeps the state current with one frame a second, so the first shown frame is already the live map
+let lastFrameAt = 0
+setInterval(() => { if (rafId && !NOPAUSE && performance.now() - lastFrameAt > 1500) { stop(); frame(performance.now()) } }, 1000)
 // the eased state (layout, card sizes, creature bodies, limbs, camera) is run ahead to rest, so a replayed map
 // appears at its settled size and place from its first frame rather than easing in from defaults
 function settle(S, T, now) {
@@ -1283,6 +1345,10 @@ function settle(S, T, now) {
   for (const A of vis.actors.values()) { A.waitK = A.waitT || 0; A.bodyK = 1 + 0.3 * smooth(A.waitK) }
 }
 function frame(ts) {
+  // a gap of more than 10 s between frames means the page was frozen (a discarded or throttled tab): the stream is
+  // refetched from the start so nothing that happened meanwhile is missing
+  if (lastFrameAt && performance.now() - lastFrameAt > 10000 && !DEMO) { resetAll(); src.seq = 0; src.epoch = null; src.retryAt = 0; loadReset() }
+  lastFrameAt = performance.now()
   schedule()
   const now = performance.now()
   const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / 60
@@ -1317,6 +1383,10 @@ function frame(ts) {
   const c = view.cam
   cull.x0 = c.x - view.w / 2 / c.z - 60; cull.y0 = c.y - view.h / 2 / c.z - 60; cull.x1 = c.x + view.w / 2 / c.z + 60; cull.y1 = c.y + view.h / 2 / c.z + 60
   drawBackground()
+  // loading: the scene is folded and settled off screen; only the plate shows until everything is here
+  if (load.active) { drawAwaiting(now, 1); return }
+  load.reveal = load.doneAt ? Math.min(1, (performance.now() - load.doneAt) / 900) : 1
+  if (!H.state.root) drawAwaiting(now, 1)
   worldTransform()
   drawWeb(now)
   drawDust(now)
@@ -1337,21 +1407,69 @@ function frame(ts) {
   drawTitle(now)
   drawTimeline(now, wall)
   updateTooltip()
+  // the reveal: the plate fades away over the finished map
+  if (load.reveal < 1) drawAwaiting(now, 1 - smooth(load.reveal))
 }
 
+let pageVersion = null
+// the heartbeat: every 3 s the page tells the server it is here (its instance id, the version it loaded, whether it
+// is shown); the answer carries the current version, and a changed one reloads the page
+const PAGE_ID = Math.random().toString(36).slice(2, 10)
+const PAGE_KEY = (/\/p\/([^/]+)\//.exec(location.pathname) || [])[1] || ''
+function heartbeat() {
+  if (DEMO || !PAGE_KEY) return
+  const vis = !document.hidden && window.innerWidth >= 2 && window.innerHeight >= 2 ? 1 : 0
+  fetch('/seen?p=' + encodeURIComponent(PAGE_KEY) + '&i=' + PAGE_ID + '&v=' + encodeURIComponent(pageVersion || '') + '&vis=' + vis, { method: 'POST' })
+    .then(r => r.ok ? r.json() : null)
+    .then(j => { if (!j) return; if (j.reload) { location.reload(); return } if (j.version) { const v = String(j.version); if (pageVersion === null) pageVersion = v; else if (v !== pageVersion) location.reload() } })
+    .catch(() => { /* the server may be gone; the polls will find out */ })
+}
+setInterval(heartbeat, 3000)
+setTimeout(heartbeat, 0)
+// shown or hidden: the server hears it at once, so an open press sees the true state without a wait
+document.addEventListener('visibilitychange', heartbeat)
+window.addEventListener('focus', heartbeat)
 function start() { if (!rafId) { last = 0; schedule() } }
 function stop() { if (rafId) { cancelAnimationFrame(rafId); clearTimeout(rafId); rafId = 0 } }
 // only the live instance restarts itself (a dev build injected over this one takes over the page)
 const SELF = {}
-document.addEventListener('visibilitychange', () => { if (window.__scope && window.__scope.self !== SELF) return; stop(); if (!document.hidden || NOPAUSE) start() })
+// hidden: the loop stops to save work (nothing else pauses, and nothing needs a click); back in view it resumes by
+// itself, resizes, and refreshes: a changed page version reloads, a long absence refetches the stream from the start
+let hiddenAt = 0
+function wake() {
+  if (window.__scope && window.__scope.self !== SELF) return
+  resize(); start()
+  const away = hiddenAt ? Date.now() - hiddenAt : 0
+  hiddenAt = 0
+  fetch('version', { cache: 'no-store' }).then(r => r.ok ? r.text() : '').then(v => {
+    v = String(v).trim()
+    if (pageVersion !== null && v && v !== pageVersion) { location.reload(); return }
+    if (away > 60000 && !DEMO) { resetAll(); src.seq = 0; src.epoch = null; src.retryAt = 0 }
+  }).catch(() => { /* next poll */ })
+}
+document.addEventListener('visibilitychange', () => {
+  if (window.__scope && window.__scope.self !== SELF) return
+  if (document.hidden && !NOPAUSE) { hiddenAt = Date.now(); stop() } else wake()
+})
+window.addEventListener('focus', () => { if (!document.hidden) wake() })
+window.addEventListener('pageshow', e => { if (e.persisted) location.reload(); else wake() })
 
 resize()
 view.hf = 1
 start()
+// inside the desktop app's browser pane (the open steps add ?pane=1): a corner control hands the view to the system
+// browser through the server, since a new window from here would only be another pane tab
+if (/[?&]pane=1/.test(location.search)) {
+  const ext = document.getElementById('ext')
+  const key = (/\/p\/([^/]+)\//.exec(location.pathname) || [])[1] || ''
+  if (ext && key) {
+    ext.style.display = 'block'
+    ext.addEventListener('click', () => { fetch('/open-external?p=' + encodeURIComponent(key), { method: 'POST' }).catch(() => { /* the status says nothing; the server may be gone */ }) })
+  }
+}
 // events flow on their own clock, so data keeps arriving even when frames are throttled
 setInterval(poll, 150)
-// auto-reload: the server's version token changes whenever index.html or scope.js changes
-let pageVersion = null
+// auto-reload: the server's version token changes whenever the page's files change
 setInterval(() => {
   fetch('version', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('http'); return r.text() }).then(v => {
     v = String(v).trim()
@@ -1360,5 +1478,5 @@ setInterval(() => {
   }).catch(() => { /* retry on the next tick */ })
 }, 5000)
 // dev aid (?debug): the live state, and tick(ms) to step one frame of a given length
-if (DEBUG) window.__scope = { self: SELF, H, vis, view, settings, src, demo, poll, frame, start, stop, pack, merged, bundles, layout, drags, dust, web, tilt, setTilt, ingest, limbLog, clusters, skulls, digest, tick: ms => { const was = !!rafId; stop(); last = performance.now() - ms; frame(performance.now()); stop(); if (was) start() } }
+if (DEBUG) window.__scope = { self: SELF, H, vis, view, settings, src, demo, poll, frame, start, stop, pack, merged, bundles, layout, drags, dust, web, tilt, setTilt, ingest, limbLog, clusters, skulls, digest, load, tick: ms => { const was = !!rafId; stop(); last = performance.now() - ms; frame(performance.now()); stop(); if (was) start() } }
 

@@ -1,4 +1,4 @@
-import type { Register } from 'claude-code'
+import type { PromptSubmitArgs, PromptSubmitResult, Register } from 'claude-code'
 
 import { isTracked } from './analyzer'
 import { isHumanPrompt, parseTranscript, projectSlug } from './backfill'
@@ -95,49 +95,79 @@ function describe(kind: ActKind, tool: string, input: Record<string, unknown>, w
   }
 }
 
-type ToolRun = (input: Record<string, unknown>) => Promise<{ text?: unknown; isError?: boolean; deny?: string }>
-
 let PANE = 'mcp__Claude_Browser__' // the browser pane's tool prefix, found from the session's tool list
+const OPEN_TEXT = '⛧ Open the Abyssal Eye' // the one line the chat shows for an open; the map's filter hides it
+let pendingOpen = '' // the instructions the next open prompt carries as hidden context
+let openWatch = 0 // when the open turn started; the plugin falls back to the system browser if no view shows up
+let reconnect: (() => Promise<void>) | null = null // the session's connect(), for an open that finds the server gone
+type SeenState = { alive: number; visible: number; current: number; latest: number }
+type Http = { fetch: (url: string, init?: { method?: string; body?: string }) => Promise<{ ok: boolean; text: string }> }
+/** What the server knows of the view's pages for this project: which are alive (a heartbeat within 10 s), shown, current. */
+async function seenState($: { http: Http }): Promise<SeenState> {
+  const none = { alive: 0, visible: 0, current: 0, latest: 0 }
+  if (!port) return none
+  const r = await $.http.fetch('http://127.0.0.1:' + port + '/seen?p=' + encodeURIComponent(project.key)).catch(() => undefined)
+  if (!r?.ok) return none
+  try { const j = JSON.parse(r.text) as Partial<SeenState>; return { alive: j.alive ?? 0, visible: j.visible ?? 0, current: j.current ?? 0, latest: j.latest ?? 0 } } catch { return none }
+}
+/** The steps for the model, as few as the view's state allows. AE tabs are the pane's tabs on this machine's view ports. */
+/** The steps for the model: the call that shows the view comes first, cleanup only when an old tab may exist. Short, and no reasoning asked for. */
+function openSteps(st: SeenState, deferred: boolean): string {
+  const u = url + '?pane=1'
+  const first = deferred
+    ? 'Call ToolSearch with query select:' + PANE + 'preview_start,' + PANE + 'tabs_context,' + PANE + 'tabs_close and, in your very next step with no commentary, ' + PANE + 'preview_start with url ' + u + '. '
+    : 'Call ' + PANE + 'preview_start with url ' + u + '. '
+  const cleanup = st.alive >= 1
+    ? 'Then call ' + PANE + 'tabs_context and ' + PANE + 'tabs_close on every other tab whose origin is http://localhost or http://127.0.0.1 on a port from 7311 to 7340, keeping only the tabId preview_start returned; never touch a tab of any other origin. '
+    : ''
+  const fail = 'If preview_start fails, call it once more; if it fails again reply with the one line "The pane did not open." and nothing else. '
+  return 'Act immediately: do not think, plan or explain. ' + first + cleanup + fail + 'Make no other tool calls. Reply with exactly the single character ⛧ and no other text.'
+}
 
-// the person's own action that raised these calls, so the permission path (and auto mode) reads them as asked for
-const CONSENT_BUTTON = 'The user pressed the "⛧ Abyssal Eye" button above the prompt to open the Abyssal Eye live view of this project in the built-in browser pane.'
-const CONSENT_COMMAND = 'The user ran /abyssal-eye to open the Abyssal Eye live view of this project in the built-in browser pane.'
-
+let opening = false // the button is working: from the press until a displayed view reports in
+let openWarned = false // the minimized-pane warning was shown for this open
+let turnBusy = false // Claude is mid-turn on the main loop: an open prompt would queue behind it
+let setOpening: (b: boolean) => void = b => { opening = b }
 /**
- * Shows the view in the desktop app's browser pane by calling its tools directly (no turn, nothing in the chat):
- * closes any Abyssal Eye tabs, then opens one fresh tab on the current view.
- * Resolves '' when shown, else why not (so the caller can fall back and say so).
+ * Opens the view in the desktop app's browser pane with at most one user-visible step. What needs no model turn is
+ * done without one: a live, current, displayed view is left alone (a status says so); a displayed page that is stale
+ * or frozen is told to reload through its next heartbeat answer. Otherwise the press (or /abyssal-eye) submits a
+ * single prompt in the person's own words that asks the model to call the pane's tools, so in every permission
+ * mode the calls are the user's own request (no permission hook, no setting touched). The chat shows only the short
+ * line; the steps ride along as context the person never sees (attached by this plugin's own prompt.submit hook),
+ * with the call that shows the view first, and the model is asked to answer with one glyph. The server is checked
+ * first (and found again if it moved). Resolves '' when handled, else why not (no pane here, no server, a refusal),
+ * so the caller falls back to the system browser.
  */
-async function showInPane(run: ToolRun, names: () => Promise<string[]>): Promise<string> {
-  try {
-    let all = await names().catch(() => [] as string[])
-    // in a fresh session the pane's tools are deferred: load them the way the model does, through ToolSearch
-    if (!all.some(n => /Browser__preview_start$/.test(n))) {
-      const tools = ['preview_start', 'tabs_context', 'tabs_close'].map(t => PANE + t).join(',')
-      await run({ tool: 'ToolSearch', query: 'select:' + tools, max_results: 5 }).catch(() => undefined)
-      all = await names().catch(() => all)
-    }
-    const start = all.find(n => /Browser__preview_start$/.test(n))
-    if (start) PANE = start.slice(0, start.length - 'preview_start'.length)
-    const ctx = await run({ tool: PANE + 'tabs_context' })
-    if (ctx.deny !== undefined) return 'tabs_context denied: ' + ctx.deny
-    const text = typeof ctx.text === 'string' ? ctx.text : ''
-    const m = /\{[\s\S]*"tabs"[\s\S]*?\]\s*\}/.exec(text)
-    const tabs = ((m ? JSON.parse(m[0]) : {}).tabs ?? []) as { tabId: string; origin?: string }[]
-    for (const t of tabs) {
-      if (t.origin && (t.origin.includes('localhost:' + port) || t.origin.includes('127.0.0.1:' + port))) {
-        await run({ tool: PANE + 'tabs_close', tabId: t.tabId }).catch(() => undefined)
-      }
-    }
-    let opened = await run({ tool: PANE + 'preview_start', url })
-    // auto mode may give no verdict the first time and asks for the call to be issued again once, as-is
-    if (opened.deny !== undefined && /again once/i.test(opened.deny)) opened = await run({ tool: PANE + 'preview_start', url })
-    if (opened.deny !== undefined) return 'preview_start denied: ' + opened.deny
-    if (opened.isError) return 'preview_start failed: ' + short(String(opened.text ?? ''), 120)
+async function openInPane($: { http: Http; ui: { status: (s: string) => void; toast: (s: string, o?: { timeoutMs?: number }) => void }; tool: { list: () => Promise<{ name: string }[]> }; prompt: { submit: (a: PromptSubmitArgs) => Promise<PromptSubmitResult> } }): Promise<string> {
+  // a repeated press while an open is pending adds nothing (no second prompt): the status says so
+  if (opening) { $.ui.status('⛧ still summoning the Eye…'); return '' }
+  setOpening(true)
+  $.ui.status('⛧ The abyss awaits…'); $.ui.toast('⛧ The abyss awaits…', { timeoutMs: 2500 })
+  // the server first: a lost or moved server is found again before the address is built
+  const ok = port ? await $.http.fetch('http://127.0.0.1:' + port + '/hello').then(r => r.ok, () => false) : false
+  if (!ok) { port = 0; if (reconnect) await reconnect() }
+  if (!port || !url) { setOpening(false); return 'the local server is not running' }
+  const st = await seenState($)
+  // nothing to do: the view is up, current and displayed
+  if (st.alive === 1 && st.visible >= 1 && st.current >= 1) { setOpening(false); $.ui.status('⛧ Abyssal Eye is open'); return '' }
+  // a displayed page that is stale reloads itself when told through its next heartbeat: no model needed
+  if (st.alive === 1 && st.visible >= 1) {
+    await $.http.fetch('http://127.0.0.1:' + port + '/seen?p=' + encodeURIComponent(project.key) + '&reload=1').catch(() => undefined)
+    openWatch = Date.now()
+    $.ui.status('⛧ Abyssal Eye is refreshing')
     return ''
-  } catch (err) {
-    return 'browser pane call failed: ' + short(String(err), 120)
   }
+  const names = await $.tool.list().then(l => l.map(t => t.name)).catch(() => [] as string[])
+  const start = names.find(n => /Browser__preview_start$/.test(n))
+  if (start) PANE = start.slice(0, start.length - 'preview_start'.length)
+  // in a fresh session the pane's tools are deferred behind ToolSearch; without either there is no pane
+  if (!start && !names.includes('ToolSearch')) { setOpening(false); return 'no browser pane in this session' }
+  pendingOpen = 'The user pressed the Abyssal Eye button. ' + openSteps(st, !start)
+  if (turnBusy) $.ui.status('⛧ the Eye waits for Claude to finish (↗ Open in browser is instant)')
+  const r = await $.prompt.submit({ text: OPEN_TEXT, asUser: true }).catch(err => ({ drop: String(err) }) as PromptSubmitResult)
+  if (r && 'drop' in r && r.drop) { pendingOpen = ''; setOpening(false); return 'prompt refused: ' + String(r.drop) }
+  return ''
 }
 
 /** Reads a source file for analysis, unless it is too large to be worth it (the stat comes first). */
@@ -318,6 +348,7 @@ export const register: Register = on => {
         } else $.ui.status('⛧ Abyssal Eye could not start its server')
       } finally { connecting = false }
     }
+    reconnect = connect
     void connect()
 
     // stream new events to the server
@@ -343,6 +374,26 @@ export const register: Register = on => {
           }, dead)
           .finally(() => { pushing = false })
       } catch { pushing = false; dead() }
+    })
+    setOpening = b => { if (opening !== b) { opening = b; $.ui.invalidate('ui.render') } }
+    $.clock.every(2000, () => {
+      if (!openWatch) { openWarned = false; return }
+      void seenState($).then(st => {
+        if (!openWatch) return
+        if (st.visible >= 1 && st.latest >= openWatch) { openWatch = 0; setOpening(false); $.ui.status('⛧ The Eye is open'); $.ui.toast('⛧ The Eye is open', { timeoutMs: 2500 }); return }
+        // the page is alive but not shown: the pane is minimized or behind another tab; say so once, ask for nothing more
+        if (st.alive >= 1 && st.latest >= openWatch && Date.now() - openWatch > 3000 && !openWarned) {
+          openWarned = true
+          const m = '⛧ The Eye is open, but the browser pane is minimized. Show the pane, or press ↗ Open in browser.'
+          $.ui.status(m); $.ui.toast(m, { timeoutMs: 6000 })
+        }
+        if (Date.now() - openWatch > 30_000) {
+          openWatch = 0; setOpening(false)
+          if (st.alive >= 1) return
+          $.ui.status('⛧ Abyssal Eye (system browser: the pane showed no view)')
+          void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+        }
+      })
     })
     $.clock.every(10_000, () => {
       try {
@@ -379,37 +430,60 @@ export const register: Register = on => {
   on('command.run', { command: 'abyssal-eye' }, async ($, e) => {
     if (unsupported) return { text: 'Abyssal Eye needs Windows (PowerShell).' }
     if (!url) return { text: 'Abyssal Eye is still waking; try again in a moment.' }
-    const why = e.args.trim() === 'browser' ? 'asked for the system browser'
-      : await showInPane(input => $.tool.call({ ...input, consent: CONSENT_COMMAND } as never), () => $.tool.list().then(l => l.map(t => t.name)))
-    if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' /abyssal-eye: ' + (why || 'opened in the browser pane') + '\n').catch(() => undefined)
+    const why = e.args.trim() === 'browser' ? 'asked for the system browser' : await openInPane($)
+    if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' /abyssal-eye: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
     if (why) await $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
-    return { text: 'Abyssal Eye: ' + url + (why ? ' (system browser: ' + why + ')' : '') }
+    return { text: 'Abyssal Eye: ' + url + (why ? ' (system browser: ' + why + ')' : ' (opening in the browser pane)') }
   })
 
-  // one small button above the prompt opens (or refreshes) the view
+  // two small buttons above the prompt: the view in the browser pane, or in the system browser
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!url || e.props.hasSurvey) return next(e)
     const { Box, Button } = $.ui.resolve(e)
     return (
       <Box>
-        <Button key="open-scope" label="⛧ Abyssal Eye" plain dimColor onPress={() => {
+        <Button key="open-scope" label={opening ? '⛧ summoning…' : '⛧ Abyssal Eye'} plain dimColor onPress={() => {
           if (Date.now() - lastOpen < 2000) return
           lastOpen = Date.now()
-          void showInPane(input => $.tool.call({ ...input, consent: CONSENT_BUTTON } as never), () => $.tool.list().then(l => l.map(t => t.name))).then(why => {
-            if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' button: ' + (why || 'opened in the browser pane') + '\n').catch(() => undefined)
+          void openInPane($).then(why => {
+            if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' button: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
             if (!why) return
             $.ui.status('⛧ Abyssal Eye (system browser: ' + why + ')')
             void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
           })
         }} />
+        <Button key="open-external" label="↗ Open in browser" plain dimColor onPress={() => {
+          if (Date.now() - lastOpen < 2000) return
+          lastOpen = Date.now()
+          void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
+        }} />
       </Box>
     )
   })
 
+  // the open prompt this plugin submitted carries its instructions as context the person never sees
+  on('prompt.submit', async ($, e, next) => {
+    if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' prompt.submit: origin ' + JSON.stringify(e.origin) + ' text ' + JSON.stringify(e.text.slice(0, 60)) + ' pending ' + (pendingOpen ? 'yes' : 'no') + '\n').catch(() => undefined)
+    if (!pendingOpen || e.text !== OPEN_TEXT || e.origin.kind !== 'plugin') return next(e)
+    const c = pendingOpen; pendingOpen = ''
+    return next({ ...e, context: [...(e.context ?? []), c] })
+  }).catch(($, e, next) => next(e))
+
+  // the standing note in the conversation's context: what the open line means, so any turn knows what to do with it
+  on('prompt.context', async ($, e, next) => {
+    const r = await next(e)
+    for (let i = 0; i < 30 && !url && !unsupported; i++) await $.clock.sleep(100)
+    if (!url) return r
+    return { ...r, blocks: [...r.blocks, { name: 'abyssalEye', text: 'The Abyssal Eye plugin adds a button that sends the message "' + OPEN_TEXT + '". When the user\'s message is exactly that line: ' + openSteps() }] }
+  }).catch(($, e, next) => next(e))
+
   // the turn is over: Claude has nothing more to do until the human speaks again
-  on('turn.complete', async ($, e, next) => { tr.emit({ type: 'idle', actor: me.main }); return next(e) }).catch(($, e, next) => next(e))
+  on('turn.complete', async ($, e, next) => { if (!e.agentId) turnBusy = false; tr.emit({ type: 'idle', actor: me.main }); return next(e) }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
+    // the open turn began: if no displayed view reports in within 30 s, the system browser gets it instead
+    if (!e.agentId) turnBusy = true
+    if (e.text === OPEN_TEXT && !e.agentId) openWatch = Date.now()
     // agents' messages and harness notices are not the human's task
     if (!isHumanPrompt(e.text)) return next(e)
     tr.emit({ type: 'prompt', text: short(e.text, 200), by: 'you', actor: me.main })

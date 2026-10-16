@@ -9,7 +9,7 @@ export type Moment =
 type Block = { type?: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean }
 
 // prompts the human did not type: harness notices, command echoes, messages from agents and plugins
-const NOT_HUMAN = /^\s*(<|Caveat:|Another Claude session sent a message|The \S+ plugin sent a message|(Open|Show) the Abyssal Eye live view|\[Request interrupted)/
+const NOT_HUMAN = /^\s*(<|Caveat:|Another Claude session sent a message|The \S+ plugin sent a message|(Open|Show) the Abyssal Eye live view|⛧ Open the Abyssal Eye|\[Request interrupted)/
 
 export function parseTranscript(text: string): Moment[] {
   const out: Moment[] = []
