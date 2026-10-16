@@ -6,6 +6,7 @@ import type { Moment } from './backfill'
 import type { ActKind } from './protocol'
 import { looksOnly, LOOK_TOOL } from './classify'
 import { Tracker } from './tracker'
+import { isNewer, versionFromManifest } from './update'
 
 const POLL_MS = 4000
 const FLUSH_MS = 100
@@ -126,6 +127,12 @@ function openSteps(st: SeenState, deferred: boolean): string {
 
 let opening = false // the button is working: from the press until a displayed view reports in
 let openWarned = false // the minimized-pane warning was shown for this open
+// the update check: once a day the published manifest is fetched (a plain GET, nothing about the person in it) and
+// compared with the installed version; a newer one shows a status and an Update button; nothing updates unclicked
+const UPDATE_URL = 'https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/plugin/.claude-plugin/plugin.json'
+let updateAvail = '' // a newer published version, when known
+let updating = false // the update commands are running
+let claudeExe = 'claude' // the claude executable the update commands run through
 let turnBusy = false // Claude is mid-turn on the main loop: an open prompt would queue behind it
 let setOpening: (b: boolean) => void = b => { opening = b }
 /**
@@ -351,6 +358,33 @@ export const register: Register = on => {
     reconnect = connect
     void connect()
 
+    // the daily update check, off the critical path and silent when anything fails; ABYSSAL_EYE_NO_UPDATE_CHECK=1
+    // (or Claude Code's own non-essential traffic switch) turns it off
+    const checkUpdate = async () => {
+      if ((await $.env.get('ABYSSAL_EYE_NO_UPDATE_CHECK').catch(() => undefined)) === '1') return
+      if (await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC').catch(() => undefined)) return
+      const envExe = await $.env.get('CLAUDE_CODE_EXECUTABLE').catch(() => undefined)
+      const execPath = (globalThis as { process?: { execPath?: string } }).process?.execPath
+      claudeExe = envExe || (execPath && /claude/i.test(execPath) ? execPath : 'claude')
+      const installed = versionFromManifest(await $.fs.read($.plugin.root.replace(/[\\/]+$/, '') + '/.claude-plugin/plugin.json').catch(() => '')) || ''
+      if (!installed) return
+      const cacheFile = config + '/abyssal-eye-update.json'
+      let cache: { checkedAt?: number; latest?: string } = {}
+      try { cache = JSON.parse(await $.fs.read(cacheFile).catch(() => '{}')) as typeof cache } catch { cache = {} }
+      let latest = typeof cache.latest === 'string' ? cache.latest : ''
+      if (typeof cache.checkedAt !== 'number' || Date.now() - cache.checkedAt > 86_400_000) {
+        const r = await Promise.race([$.http.fetch(UPDATE_URL).catch(() => undefined), $.clock.sleep(6000).then(() => undefined)])
+        latest = r && r.ok ? versionFromManifest(r.text) || '' : ''
+        await $.fs.write(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest })).catch(() => undefined)
+      }
+      if (!latest || !isNewer(latest, installed)) return
+      updateAvail = latest
+      await $.clock.sleep(4000) // after the server's own status line
+      $.ui.status('⛧ Abyssal Eye ' + latest + ' is available')
+      $.ui.invalidate('ui.render')
+    }
+    void checkUpdate().catch(() => undefined)
+
     // stream new events to the server
     const q = () => '?p=' + encodeURIComponent(project.key) + '&s=' + encodeURIComponent(me.session) + '&i=' + me.instance + '&name=' + encodeURIComponent(project.name)
     // refused: another copy of the plugin owns this session's stream; try again later in case it went away
@@ -457,6 +491,20 @@ export const register: Register = on => {
           lastOpen = Date.now()
           void $.process.run(['cmd', '/c', 'start', '', url]).catch(() => undefined)
         }} />
+        {updateAvail ? <Button key="update" label={updating ? '⛧ updating…' : '⬆ Update to ' + updateAvail} plain dimColor onPress={() => {
+          // the only path that updates: the person's click runs the marketplace refresh, then the plugin update
+          if (updating) return
+          updating = true; $.ui.invalidate('ui.render')
+          void (async () => {
+            const fail = (e: unknown) => ({ exitCode: 1, stdout: '', stderr: String(e) })
+            const a = await $.process.run([claudeExe, 'plugin', 'marketplace', 'update', 'abyssal-eye']).catch(fail)
+            const b = a.exitCode === 0 ? await $.process.run([claudeExe, 'plugin', 'update', 'abyssal-eye-eye']).catch(fail) : a
+            updating = false
+            if (b.exitCode === 0) { $.ui.status('⛧ updated to ' + updateAvail + ', restart Claude Code to apply'); updateAvail = '' }
+            else $.ui.status('⛧ update failed: ' + short(b.stderr || b.stdout || 'unknown error', 120))
+            $.ui.invalidate('ui.render')
+          })()
+        }} /> : null}
       </Box>
     )
   })

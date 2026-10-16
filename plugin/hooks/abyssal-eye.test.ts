@@ -4,6 +4,7 @@ import { analyze, computeEdges, isTracked } from './analyzer'
 import { looksOnly, LOOK_TOOL } from './classify'
 import { parseTranscript, projectSlug } from './backfill'
 import { Tracker } from './tracker'
+import { isNewer, versionFromManifest } from './update'
 
 const PLAYER = `using UnityEngine;
 // class Fake {}
@@ -405,4 +406,18 @@ Phase two
   expect(isTracked('vendor/x.go')).toBe(false)
   expect(isTracked('Makefile')).toBe(true)
   expect(isTracked('x.unknownext')).toBe(true)
+})
+
+test('the update check compares versions numerically and reads a manifest', () => {
+  expect(isNewer('0.7.17', '0.7.16')).toBe(true)
+  expect(isNewer('0.8.0', '0.7.99')).toBe(true)
+  expect(isNewer('1.0', '0.9.9')).toBe(true)
+  expect(isNewer('0.7.16', '0.7.16')).toBe(false)
+  expect(isNewer('0.7.9', '0.7.16')).toBe(false)
+  expect(isNewer('v0.7.17', '0.7.16')).toBe(true)
+  expect(isNewer('garbage', '0.7.16')).toBe(false)
+  expect(isNewer('0.7.17', '')).toBe(false)
+  expect(versionFromManifest('{"name":"abyssal-eye","version":"0.7.17"}')).toBe('0.7.17')
+  expect(versionFromManifest('not json')).toBe(undefined)
+  expect(versionFromManifest('{"version":7}')).toBe(undefined)
 })
