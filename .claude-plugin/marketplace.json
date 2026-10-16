@@ -1,0 +1,6 @@
+{
+  "name": "abyssal-eye",
+  "owner": { "name": "Abyssal Eye contributors" },
+  "description": "Abyssal Eye: a live Lovecraftian visualisation of Claude Code at work.",
+  "plugins": [{ "name": "abyssal-eye", "source": "./plugin", "description": "A living Lovecraftian map of what Claude Code is doing in your codebase." }]
+}

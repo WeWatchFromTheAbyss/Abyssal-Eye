@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Abyssal Eye</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1C2321; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: default; }
+  #tip {
+    position: fixed; pointer-events: none; display: none; white-space: pre;
+    font: 11.5px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #DCD2B0;
+    background: rgba(20, 26, 24, .92); border: 1px solid rgba(168, 132, 58, .45); border-radius: 3px;
+    padding: 5px 8px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; z-index: 2;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tip"></div>
+<script src="core.js"></script>
+<script src="layout.js"></script>
+<script src="draw.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
