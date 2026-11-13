@@ -75,7 +75,8 @@ my %reloadAt;
 my %prefs; # per project: what the view asked for (history => 0|1), read by the plugin
 my $lastPing = time;
 my %types = ('.html' => 'text/html; charset=utf-8', '.js' => 'text/javascript; charset=utf-8', '.css' => 'text/css', '.svg' => 'image/svg+xml', '.png' => 'image/png');
-my $json = JSON::PP->new->utf8;
+# the faster JSON::XS when the system has it, the core JSON::PP otherwise
+my $json = eval { require JSON::XS; JSON::XS->new->utf8 } || JSON::PP->new->utf8;
 my @own = ("http://localhost:$port", "http://127.0.0.1:$port", "http://[::1]:$port");
 
 sub nowMs { return int(time * 1000) }
@@ -89,7 +90,7 @@ sub readRequest {
   while (index($buf, "\r\n\r\n") < 0) {
     my $left = $deadline - time;
     return undef if $left <= 0 || length($buf) > 65536;
-    return undef unless $sel->can_read($left);
+    return undef unless $sel->can_read($left < 1 ? $left : 1); # a client that stalls for a second is dropped
     my $n = sysread($c, $buf, 16384, length($buf));
     return undef unless $n;
   }
@@ -106,7 +107,7 @@ sub readRequest {
   while (length($body) < $len) {
     my $left = $deadline - time;
     return undef if $left <= 0;
-    return undef unless $sel->can_read($left);
+    return undef unless $sel->can_read($left < 1 ? $left : 1); # a client that stalls for a second is dropped
     my $n = sysread($c, $body, 65536, length($body));
     return undef unless $n;
   }
@@ -136,7 +137,7 @@ sub send_ {
   # a client that stops reading must not hang the loop
   while ($off < length($data)) {
     my $left = $deadline - time;
-    last if $left <= 0 || !$sel->can_write($left);
+    last if $left <= 0 || !$sel->can_write($left < 1 ? $left : 1);
     my $n = syswrite($c, $data, length($data) - $off, $off);
     last unless defined $n;
     $off += $n;
@@ -162,7 +163,7 @@ sub project {
 # the page's version token: changes whenever the page's files change, so open pages can reload themselves
 sub stamp {
   my $s = 0;
-  for my $f ('index.html', 'core.js', 'layout.js', 'draw.js', 'main.js') { my $fp = File::Spec->catfile($rootFull, $f); $s += (stat($fp))[9] if -e $fp }
+  for my $f ('index.html', 'core.js', 'layout.js', 'draw.js', 'life.js', 'main.js') { my $fp = File::Spec->catfile($rootFull, $f); $s += (stat($fp))[9] if -e $fp }
   return "$s";
 }
 # heartbeats: each open page of a project reports every few seconds (its instance id, the version it loaded, whether

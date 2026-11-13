@@ -11,8 +11,10 @@ export class Tracker {
   root = ''
   files = new Map<string, FileFacts>()
   mtimes = new Map<string, number>()
-  log: Ev[] = []
-  sent = 0 // log entries the server has
+  log: Ev[] = [] // the events not yet dropped; base counts the ones dropped from its front
+  sent = 0 // entries of log the server has
+  base = 0
+  batching = false // several files are being set at once: bindings are worked out once, at the end
   private seq = 0
   private nodes = new Map<string, string>() // id -> signature last emitted
   private edges = new Map<string, 'pending' | 'live'>()
@@ -23,7 +25,13 @@ export class Tracker {
   emit(body: Body, t = Date.now()): void {
     if (this.hold && !this.replaying) { this.held.push({ body, t }); return }
     this.log.push({ ...body, seq: ++this.seq, t } as Ev)
+    // bounded memory: once the log is long, the oldest entries the server already holds are dropped
+    if (this.log.length > 40000 && this.sent > 10000) { this.log.splice(0, 10000); this.sent -= 10000; this.base += 10000 }
   }
+  /** How many of this session's lines the server holds, as the server counts them. */
+  from(): number { return this.base + this.sent }
+  /** The server lost what it held (or another one answers): everything still kept is sent again from the start. */
+  resetSent(): void { this.sent = 0; this.base = 0 }
   /** The replay is queued: the events that waited follow it, in the order they came. */
   release(): void {
     this.hold = false
@@ -58,11 +66,15 @@ export class Tracker {
     const facts = text === undefined ? undefined : analyze(rel, text)
     const delta = facts ? lineDelta(old?.lineHashes, facts.lineHashes) : { added: 0, removed: old?.lines ?? 0 }
     if (facts) this.files.set(rel, facts); else this.files.delete(rel)
-    resolveKinds(this.files)
+    // only the changed file is signed again, and any file whose types changed kind because of it
+    const dirty = resolveKinds(this.files)
+    dirty.add(rel)
 
     const folder = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.'
     const ids = new Set<string>()
-    for (const f of this.files.values()) {
+    for (const name of dirty) {
+      const f = this.files.get(name)
+      if (!f) continue
       for (const tf of f.types) {
         if (f.rel === rel) ids.add(tf.id)
         const members = tf.members.map(m => (m.callback ? { name: m.name, start: m.start, end: m.end, cb: true } : { name: m.name, start: m.start, end: m.end }))
@@ -76,8 +88,14 @@ export class Tracker {
     for (const id of [...this.nodes.keys()]) {
       if (id.startsWith(rel + '#') && !ids.has(id)) { this.nodes.delete(id); this.emit({ type: 'node-gone', id }, t) }
     }
-    this.syncEdges(baseline, t)
+    if (!this.batching) this.syncEdges(baseline, t)
     return delta
+  }
+
+  /** Ends a batch of setFile calls: the bindings of everything set are worked out once. */
+  endBatch(baseline: boolean, t = Date.now()): void {
+    this.batching = false
+    this.syncEdges(baseline, t)
   }
 
   private folderOf(id: string): string {
@@ -103,7 +121,10 @@ export class Tracker {
 
   /** The bindings an edit would tie, shown as pending while the human decides. */
   propose(rel: string, after: string): string[] {
-    const trial = new Map(this.files)
+    // a trial copy down to each type, so resolving kinds for the proposal never touches the real map (the edit may
+    // be denied)
+    const trial = new Map<string, FileFacts>()
+    for (const [k, f] of this.files) trial.set(k, { ...f, types: f.types.map(tf => ({ ...tf })) })
     trial.set(rel, analyze(rel, after))
     resolveKinds(trial)
     const out: string[] = []
@@ -142,6 +163,7 @@ export class Tracker {
 
   /** JSON lines of everything the server does not have yet; the server numbers them. */
   takeBatch(): string | undefined {
+    if (this.sent < 0) this.sent = 0
     if (this.sent >= this.log.length) return undefined
     const part = this.log.slice(this.sent, this.sent + 2000)
     return part.map(e => JSON.stringify({ ...e, seq: undefined })).join('\n')

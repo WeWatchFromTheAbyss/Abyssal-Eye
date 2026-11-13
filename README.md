@@ -27,16 +27,21 @@ Pick the user scope so every project gets the view. Restart Claude Code once.
 
 ## First run
 
-- In the desktop app a small "⛧ Abyssal Eye" button appears above the prompt. Pressing it (or running `/abyssal-eye`) sends one short message in your name, "⛧ Open the Abyssal Eye", and attaches instructions Claude reads but the chat does not show: open the view in the browser pane and close extra Abyssal Eye tabs. Claude answers with a single glyph. Because the request is yours, this works the same in default, accept-edits and auto modes, with no permission rule to add; it costs one short model turn and waits for the current turn to finish. The prompt is not shown on the map. Without a browser pane (a terminal session) the view opens in your system browser instead; `/abyssal-eye browser` always does. A second button, "↗ Open in browser", opens the view in your system browser straight away, and inside the pane the page itself shows a small ↗ control in its lower right corner that does the same.
+- In the desktop app a small "⛧ Abyssal Eye" button appears above the prompt. Pressing it (or running `/abyssal-eye`) opens the view in the built-in browser pane: the plugin calls the pane's own tools directly, with no prompt and no model turn, keeps exactly one Abyssal Eye tab and reloads it in place when it is already shown. If the pane cannot be reached that way, it falls back to one short message in your name, "⛧ Open the Abyssal Eye", with instructions attached that Claude reads but the chat does not show (open the view in the browser pane and close extra Abyssal Eye tabs), answered with a single glyph. Without a browser pane (a terminal session) the view opens in your system browser instead; `/abyssal-eye browser` always does. A second button, "↗ Open in browser", opens the view in your system browser straight away, and inside the pane the page itself shows a small ↗ control in its lower right corner that does the same.
 - The status line shows the view's address, `http://localhost:7311/p/<project>/`. One view per project, fed by every Claude session working in it.
 - `http://localhost:7311/` lists the projects the server knows about.
 - Add `?demo` to a view's address to play a scripted demo session with no Claude involved.
 
-Controls: the mouse wheel zooms, dragging pans, double-clicking returns to following the work. Drag the thin bar at the bottom to rewind; drag it to the right end to return to live. Right-drag (or shift-drag) tilts the view. `Q` cycles the quality, `M` cycles the motion (down to a still map). Drag a card to pin it; double-click it to release it.
+Controls: the mouse wheel (or a pinch) zooms, dragging pans; a hand on the camera pauses the automatic framing until you double-click empty space or press `F` (or leave the view alone for five minutes). Right-drag (or shift-drag) tilts the view. `Q` cycles the quality, `M` the motion (off, calm, full), `H` switches earlier sessions on the map. Drag a card to pin it; double-click it to release it. Click a pile to fan out its first layer (click a card in the fan to open it; click the pile, empty space or Esc to fold it back). Creatures notice your cursor: eyes follow it, souls flee it, tendrils reach for it. `?` (or the ? control in the corner) shows the controls and a legend.
 
 ## What you are looking at
 
-- **Pyramid with an eye**: a Claude session. The eye looks at what it works on and blinks; it closes while Claude thinks. Smaller pyramids tethered to it are subagents; a finished subagent shrinks to a knot on its branch.
+- **Pyramid with an eye**: a Claude session. The eye is a ball turning behind its lids: it looks at the row being worked on, darts in saccades and blinks; it closes while Claude thinks. Smaller pyramids are subagents, each joined to its parent by a soft **tube**; the beads passing through it are data (orders out in the session's hue, reports back in violet). A finished subagent fades from the map.
+- **A pyramid with a fringe**: an agent running on Fable. It keeps the pyramid and its eye, with a fringe of face tentacles on its lower edge (its working tentacles grow from there), a few small extra eyes, and a fleshy outline that sags and undulates. An inspector on Fable keeps its own form and takes a few of the tentacles.
+- **A spiral eye**: a subagent listening to its orders (just summoned, or just spoken to); it clears when the subagent starts to act.
+- **A skewered subagent**: a correction. The parent sent it new instructions after it had reported, or took up a file it had just edited or failed on; the parent's barbed tentacle goes through it, it bleeds its own colour for a moment, and carries on.
+- **Slime** dripping from a creature: it is hard at work (many calls in a few seconds, or a long busy streak).
+- **z z Z**: asleep. A creature left idle for about 20 seconds closes its eye and its tendrils grow and dance; anything new wakes it at once, and so does your cursor.
 - **Tentacles**: edits. A tentacle reaches the method being written and electrifies the tome. Gross edits make the tome wobble and drip.
 - **Eye stalks**: reading and searching. They scan the lines Claude reads. Many stalks is a wide survey.
 - **Tomes**: classes and files, with their members listed; the ones Claude touched recently sit close to its vortex, the rest orbit further out. Folders are **wards**, the thin dotted arcs with a name. Quiet tomes fold to their header, then gather into **piles** labelled by what they hold; the heavy, well-connected tome of a cluster sits at its centre, slightly larger.
@@ -52,7 +57,7 @@ Controls: the mouse wheel zooms, dragging pans, double-clicking returns to follo
 
 1. **Watch a long task.** Give Claude a refactor and leave the view on a second monitor. You see where it is reading, where it is writing, when it is waiting on you, and when it is done, without tailing the chat.
 2. **Review what an edit will bind.** When Claude proposes an edit, the strands it would create appear while the permission dialog is up. A strand crossing into a folder you did not expect is a reason to look before approving.
-3. **Rewind a session.** Drag the bar at the bottom back to see what Claude touched first, how its attention moved, and which bindings came and went. Several sessions in one project share the view, each with its own pyramid.
+3. **Watch several agents at once.** Subagents appear as their own creatures, tethered to whoever summoned them; you see who is being briefed, who is working hard, who sleeps and who had to be corrected. Several sessions in one project share the view, each with its own pyramid.
 
 ## Supported languages
 
@@ -74,20 +79,22 @@ Everything stays on your machine. There is no telemetry. The sections below list
 
 Each hook observes; none blocks, allows or rewrites what Claude or you do, with the one exception named under prompt.submit.
 
-- **session.start**: when a session starts. Works out the project (repository root), finds perl, starts or finds the local server, replays the session's own transcript into the map, registers the `/abyssal-eye` command and starts its timers (push events every 100 ms, ping every 10 s, look for your own edits to mapped files every 4 s). Decides nothing; always lets the session start.
-- **tool.call**: around every tool call of the session and its subagents. Sees the tool's name and input. For Read, Edit, Write, NotebookEdit, Grep and Glob it reads the file the call names and analyses it; for Bash it records the description and whether the command only looks; for Agent it records the description and a prompt excerpt (160 characters). It then lets the call run unchanged and records whether it failed. It never changes a call's input or result, never denies or allows a call, and never calls a tool itself.
+- **session.start**: when a session starts. Works out the project (repository root), asks the engine which model the session runs on (its name only, for the creature's look), finds perl, starts or finds the local server, replays the session's own transcript into the map, registers the `/abyssal-eye` command and starts its timers (push events every 100 ms, ping every 10 s, look for your own edits to mapped files every 4 s). Decides nothing; always lets the session start.
+- **tool.call**: around every tool call of the session and its subagents. Sees the tool's name and input. For Read, Edit, Write, NotebookEdit, Grep, Glob and LSP it reads the file the call names and analyses it; for Bash it records the description and whether the command only looks; for Agent and Workflow it records the description and a prompt excerpt (160 characters); for browser and desktop tools it records the address or the action; for other tools a short detail (a skill name, a query, a description, an address, or who a message is sent to); for Agent it also records the `model` the call names. It then lets the call run unchanged and records whether it failed and whether the engine says it changed nothing. It never changes a call's input or result, never denies or allows a call, and never calls a tool in its place.
+- **agent.spawn**: when a subagent starts. Records its id, description, type, the model it runs on, the call that summoned it and a prompt excerpt (160 characters), so the map shows who is who. Passes the spawn through unchanged.
+- **classic.SubagentStop**: when a subagent ends. Records that it is done. Changes nothing.
+- **classic.FileChanged**: when Claude Code reports a changed file. If the file is on the map it is read again at once (your own edit shows sooner). Changes nothing.
 - **turn.start**: when a turn starts. Records the first 80 characters of your prompt as the map's caption (not for the plugin's own open line) and notes that Claude is busy. Changes nothing.
 - **turn.step**: around each request to the model. Records that Claude is thinking, the number of messages sent, and afterwards the context window use (tokens used and window size, from the session's own usage figures) for the souls. Passes every chunk through unread and unchanged.
 - **turn.complete**: when a turn ends. Records that Claude is idle. Changes nothing.
-- **classic.PermissionRequest**: when a permission dialog is shown. Records that the pending call waits on you (the open mouth). It does not answer the dialog and has no say in the decision.
-- **prompt.submit**: when a prompt is submitted. It acts only on the plugin's own open line (text exactly "⛧ Open the Abyssal Eye", submitted by this plugin): it attaches the instructions quoted under Prompts as hidden context. Every other prompt passes through untouched.
-- **prompt.context**: once per conversation, when the context blocks of the first message are built. Adds one block named `abyssalEye` that tells Claude what the open line means (the same instructions as under Prompts). Changes no other block.
-- **command.run** (`/abyssal-eye`): opens the view (see Prompts), or with `browser` opens the system browser.
+- **classic.PermissionRequest**: when a permission dialog is shown. Records which pending call waits on you (the open mouth), matching the dialog's tool and input. It does not answer the dialog and has no say in the decision.
+- **prompt.submit**: when a prompt is submitted. It acts only on the plugin's own open line (text exactly "⛧ Open the Abyssal Eye", submitted by this plugin as a fallback, see Prompts): it attaches the steps quoted there as hidden context. Every other prompt passes through untouched.
+- **command.run** (`/abyssal-eye`): opens the view (see Browser pane), or with `browser` opens the system browser.
 - **ui.render** (AbovePrompt): draws the "⛧ Abyssal Eye" and "↗ Open in browser" buttons, and "⬆ Update to <version>" when an update is known.
 
 ### Programs run
 
-- **perl** `<plugin>/web/server.pl --root <plugin>/web --port 7311 --daemon`: the local server (plain readable Perl, core modules only). It serves the page and holds the event stream in memory, started once per machine, detached, with no window; it exits after 10 minutes without a session. On macOS and Linux perl is run by name. On Windows perl is not on the PATH, so the plugin looks for the `usr\bin\perl.exe` inside Git for Windows (from CLAUDE_CODE_GIT_BASH_PATH, else `C:\Program Files\Git`, `C:\Program Files (x86)\Git`, `%LOCALAPPDATA%\Programs\Git`) and runs that file; that is the only program path worked out at run time.
+- **perl** `<plugin>/web/server.pl --root <plugin>/web --port 7311 --daemon`: the local server (plain readable Perl, core modules only; it uses JSON::XS instead of JSON::PP when the system has it). It serves the page and holds the event stream in memory, started once per machine, detached, with no window; it exits after 10 minutes without a session. On macOS and Linux perl is run by name. On Windows perl is not on the PATH, so the plugin looks for the `usr\bin\perl.exe` inside Git for Windows (from CLAUDE_CODE_GIT_BASH_PATH, else `C:\Program Files\Git`, `C:\Program Files (x86)\Git`, `%LOCALAPPDATA%\Programs\Git`) and runs that file; that is the only program path worked out at run time.
 - **perl -v**: once at session start, to learn whether perl exists.
 - **uname -s**: once at session start on macOS and Linux, to tell the two apart.
 - **cmd /c start "" <view address>** (Windows), **open <view address>** (macOS), **xdg-open <view address>** (Linux): opens the view in your system browser, only when you press "↗ Open in browser", run `/abyssal-eye browser`, or the browser pane is unavailable. The address is always the plugin's own `http://localhost:<port>/p/<project>/`.
@@ -96,23 +103,27 @@ Each hook observes; none blocks, allows or rewrites what Claude or you do, with 
 
 No shell is invoked and no inline script is run.
 
+### Browser pane
+
+When you press "⛧ Abyssal Eye" (or run `/abyssal-eye`) in the desktop app, the plugin calls the desktop app's own browser pane directly, through the engine's connection to the pane's MCP server (`Claude_Browser`), with these four tools and nothing else: `tabs_context` (no arguments, to see the pane's tabs and whether it is shown), then `navigate` with the view's address and the id of an Abyssal Eye tab that is already displayed, or else `preview_start` with the view's address, then `tabs_close` for any other Abyssal Eye tab (a tab whose origin is `http://localhost` or `http://127.0.0.1` on a port from 7311 to 7340). Tabs of any other origin are never touched. Nothing is sent but the view's own address. If a live, current view is already displayed, nothing is called at all.
+
 ### Network
 
-- **127.0.0.1, ports 7311 to 7340** (the local server, loopback only): the plugin sends the session's events (tool names, file paths, class and member names, counts of added and removed lines, prompt excerpts of 80 characters, context window use) to `/push`, a keep-alive to `/ping`, and reads `/hello`, `/seen` and `/pref`. The server listens on 127.0.0.1 and [::1] only, refuses peers that are not loopback, refuses requests whose Host is not localhost, 127.0.0.1 or [::1], and refuses cross-site posts. The view page talks to the same server (events, a heartbeat every 3 s with its instance id, the page version and whether it is shown, your earlier-sessions switch, and the ↗ control).
-- **raw.githubusercontent.com** (only in builds whose `config.json` has `"updateCheck": true`, and never when ABYSSAL_EYE_NO_UPDATE_CHECK=1 or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set): one GET of `https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/.claude-plugin/plugin.json` per session start, with no body, no cookies and no headers of the plugin's own, to compare versions. Nothing about you or your project is sent.
+- **127.0.0.1, ports 7311 to 7340** (the local server, loopback only): the plugin sends the session's events (tool names, file paths, class and member names, counts of added and removed lines, prompt excerpts of 80 characters, model names, context window use, and the view's default quality and motion from your settings) to `/push`, a keep-alive to `/ping`, and reads `/hello`, `/seen` and `/pref`. The server listens on 127.0.0.1 and [::1] only, refuses peers that are not loopback, refuses requests whose Host is not localhost, 127.0.0.1 or [::1], and refuses cross-site posts. The view page talks to the same server (events, a heartbeat every 3 s with its instance id, the page version and whether it is shown, your earlier-sessions switch, and the ↗ control).
+- **raw.githubusercontent.com** (only while the plugin's "Update check" setting is on, and never when ABYSSAL_EYE_NO_UPDATE_CHECK=1 or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set): one GET of `https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/.claude-plugin/plugin.json` per session start, with no body, no cookies and no headers of the plugin's own, to compare versions. Nothing about you or your project is sent.
 
 Nothing else is contacted.
 
 ### Files
 
-- **Read**: the current session's transcript and its subagents' transcripts under `<Claude config folder>/projects/<project>/` (only those `.jsonl` files; nothing else in the config folder is opened); earlier transcripts of the same project (up to 25 from the last 14 days) only when you opt in with ABYSSAL_EYE_HISTORY=1 or the H key in the view; the source files Claude touches (files over about 1.5 MB are skipped), read again when they change so your own edits show; the plugin's own `config.json` and `.claude-plugin/plugin.json`.
-- **Written by the plugin**: none. It writes no settings, instruction, build or start-up file, and no file of its own.
+- **Read**: the current session's transcript and its subagents' transcripts under `<Claude config folder>/projects/<project>/` (only those `.jsonl` files; nothing else in the config folder is opened); earlier transcripts of the same project (up to 25 from the last 14 days) only when you opt in (the "Earlier sessions on the map" setting, ABYSSAL_EYE_HISTORY=1, or the H key in the view); the source files Claude touches (files over about 1.5 MB are skipped), read again when they change so your own edits show; the plugin's own `.claude-plugin/plugin.json`.
+- **Written by the plugin**: none. It writes no settings, instruction, build or start-up file, and no file of its own. Its settings are kept by Claude Code (`/config`).
 - **Written by the server**: one empty lock file, `abyssal-eye-server.lock`, in `$XDG_RUNTIME_DIR`, else `~/.cache`, else the temp folder (there named `abyssal-eye-server-<user>.lock`), so only one server runs. The event stream is kept in memory only.
 - **In your browser**: the view keeps its settings (quality, motion, tilt, pinned cards, the earlier-sessions switch) in localStorage for its own address.
 
 ### Prompts submitted
 
-One, and only when you press the "⛧ Abyssal Eye" button or run `/abyssal-eye` in the desktop app while no current view is already displayed. The visible message, sent in your name, is exactly:
+Normally none: the pane is opened by the direct call described under Browser pane. Only if that call fails (for example the pane's server cannot be reached) does the plugin fall back to one prompt, sent in your name when you press the button, so that Claude opens the pane in a turn you asked for. The visible message is exactly:
 
 ```
 ⛧ Open the Abyssal Eye
@@ -124,7 +135,7 @@ The hidden context attached to it (Claude reads it, the chat does not show it) i
 The user pressed the Abyssal Eye button. Act immediately: do not think, plan or explain. Call <browser pane>preview_start with url http://localhost:<port>/p/<project>/?pane=1. Then call <browser pane>tabs_context and <browser pane>tabs_close on every other tab whose origin is http://localhost or http://127.0.0.1 on a port from 7311 to 7340, keeping only the tabId preview_start returned; never touch a tab of any other origin. If preview_start fails, call it once more; if it fails again reply with the one line "The pane did not open." and nothing else. Make no other tool calls. Reply with exactly the single character ⛧ and no other text.
 ```
 
-The tab clean-up sentence is included only when a view is already open; when the pane's tools are not loaded yet, the first sentence asks for one ToolSearch that selects those three tools. The plugin itself never calls a tool: Claude does, in a turn you asked for. No other prompt is ever submitted, and nothing from your files or transcripts is put in a prompt.
+The tab clean-up sentence is included only when a view is already open; when the pane's tools are not loaded yet, the first sentence asks for one ToolSearch that selects those three tools. No other prompt is ever submitted, nothing is added to any other prompt or to the conversation's standing context, and nothing from your files or transcripts is put in a prompt.
 
 ### Credentials
 
@@ -134,12 +145,12 @@ None. The plugin reads no token, key, password or credentials file, and has nowh
 
 One small helper reads a named field of a tool call's input by its key (for example `file_path`, `command` or `description`), because every tool has a different input shape. The keys are fixed words in the source. There is no eval, no generated code and no dynamic import.
 
-### Switches
+### Settings and switches
 
-- `ABYSSAL_EYE_HISTORY=1`: also seed the map from earlier sessions of the project (or press H in the view).
-- `ABYSSAL_EYE_NO_UPDATE_CHECK=1`: no update check.
-- `config.json` in the plugin folder, `"updateCheck": false`: no update check, no Update button, no `claude` command.
-- On the page, only with `?debug` in the address: `skip=<seconds>` and `noloop` for the demo, `nopause` to keep animating in a hidden tab, `stress=<n>` for a large demo map, and `window.__scope` for the live state.
+- In `/config`, under the plugin: **Update check** (on by default in the GitHub build), **Earlier sessions on the map** (off by default), **Default quality** (low, medium, high) and **Default motion** (off, calm, full) for a viewer who has not chosen with Q and M. A system that asks for reduced motion starts with motion off.
+- `ABYSSAL_EYE_HISTORY=1`: also seed the map from earlier sessions of the project (the same as the setting, or the H key in the view).
+- `ABYSSAL_EYE_NO_UPDATE_CHECK=1`: no update check, whatever the setting says.
+- On the page, only with `?debug` in the address: `skip=<seconds>` and `noloop` for the demo, `nopause` to keep animating in a hidden tab, `stress=<n>` for a large demo map, `force=hyp,slime,wait,sleep` to hold a state on every creature, and `window.__abyss` for the live state.
 
 ## Privacy
 

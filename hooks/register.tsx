@@ -4,7 +4,7 @@ import { isTracked } from './analyzer'
 import { isHumanPrompt, parseTranscript, projectSlug } from './backfill'
 import type { Moment } from './backfill'
 import type { ActKind } from './protocol'
-import { looksOnly, LOOK_TOOL } from './classify'
+import { describe, kindOf } from './classify'
 import { Tracker } from './tracker'
 import { isNewer, versionFromManifest } from './update'
 
@@ -37,7 +37,9 @@ let passiveUntil = 0 // another copy of this plugin streams this session until t
 const project = { key: '', name: '' }
 const me = { session: '', main: 'main', instance: Math.random().toString(36).slice(2, 10) }
 const touched = new Map<string, number>() // rel -> when Claude last wrote it, so the poller does not call it a human edit
-const thralls: { label: string; task?: string; parent: string; spawn: string; role?: string }[] = [] // subagents asked for, waiting for their first call
+type Thrall = { label: string; task?: string; parent: string; spawn: string; role?: string; model?: string }
+const thralls: Thrall[] = [] // subagents asked for, waiting for their first call (the fallback when no spawn was seen)
+const spawned = new Map<string, Thrall>() // subagents by their agent id, as the agent.spawn hook saw them start
 /** A subagent summoned to review, verify, inspect, audit or check work is an inspector (drawn as TheyEye).
  *  Conservative: the agent type or description must say so, or the prompt must open with such a verb. */
 const INSPECT = /\b(review(er|ing)?|verif(y|ier|ication)|inspect(or|ion)?|audit(or)?|check(er)?|qa|quality assurance|validat(e|or|ion))\b/i
@@ -49,7 +51,15 @@ function roleOf(input: unknown): 'inspector' | undefined {
   return undefined
 }
 const actors = new Set<string>()
-const openCalls: { id: string; tool: string }[] = [] // tool calls running now, newest last
+const openCalls: { id: string; tool: string; input: unknown }[] = [] // tool calls running now, newest last
+/** Whether a permission dialog's tool input is that of an open call (the fields that tell two calls of one tool apart). */
+function sameCall(open: unknown, asked: unknown): boolean {
+  for (const k of ['file_path', 'notebook_path', 'path', 'command', 'url', 'pattern', 'prompt', 'description', 'query']) {
+    const a = str(asked, k)
+    if (a !== undefined && a !== str(open, k)) return false
+  }
+  return true
+}
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'project'
@@ -67,20 +77,6 @@ const str = (e: unknown, k: string): string | undefined => {
   return typeof v === 'string' ? v : undefined
 }
 
-function kindOf(tool: string): ActKind {
-  switch (tool) {
-    case 'Read': return 'read'
-    case 'Edit': case 'MultiEdit': case 'NotebookEdit': return 'edit'
-    case 'Write': return 'write'
-    case 'Grep': case 'Glob': case 'LS': return 'search'
-    case 'Bash': case 'PowerShell': case 'BashOutput': return 'bash'
-    case 'Agent': case 'Task': return 'agent'
-    case 'WebFetch': case 'WebSearch': return 'web'
-    case 'TodoWrite': case 'TaskCreate': case 'TaskUpdate': return 'todo'
-    default: return 'tool'
-  }
-}
-
 function lineOf(text: string, needle: string | undefined): number | undefined {
   if (!needle) return undefined
   const i = text.indexOf(needle)
@@ -88,20 +84,6 @@ function lineOf(text: string, needle: string | undefined): number | undefined {
   let n = 1
   for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++
   return n
-}
-
-/** A short description of a call, and whether it only looks. */
-function describe(kind: ActKind, tool: string, input: Record<string, unknown>, where: string | undefined): { detail?: string; look: boolean } {
-  const command = str(input, 'command')
-  const look = kind === 'bash' ? !!command && looksOnly(command) : kind === 'tool' ? LOOK_TOOL.test(tool) : false
-  switch (kind) {
-    case 'read': case 'edit': case 'write': return { detail: where, look }
-    case 'search': return { detail: short((str(input, 'pattern') ?? '') + (where ? ' in ' + where : ''), 80), look }
-    case 'bash': return { detail: short(str(input, 'description') ?? command ?? '', 80), look }
-    case 'agent': return { detail: short(str(input, 'description') ?? str(input, 'subagent_type') ?? 'a thrall', 40), look }
-    case 'web': return { detail: short(str(input, 'url') ?? str(input, 'query') ?? '', 80), look }
-    default: return { look }
-  }
 }
 
 let PANE = 'mcp__Claude_Browser__' // the browser pane's tool prefix, found from the session's tool list
@@ -135,30 +117,57 @@ function openSteps(st: SeenState, deferred: boolean): string {
 
 let opening = false // the button is working: from the press until a displayed view reports in
 let openWarned = false // the minimized-pane warning was shown for this open
-// the update check (only when the shipped config.json allows it): at session start the published manifest is
-// fetched (a plain GET, nothing about the person in it) and compared with the installed version; a newer one shows
-// a status and an Update button; nothing updates unclicked
-let updateAvail = '' // a newer published version, when known
-let updating = false // the update commands are running
-let historyWanted = false // earlier sessions of the project seed the map (opt in)
 let turnBusy = false // Claude is mid-turn on the main loop: an open prompt would queue behind it
 let setOpening: (b: boolean) => void = b => { opening = b }
+type Mcp = { call: (server: string, tool: string, args?: Record<string, unknown>) => Promise<{ content?: unknown; isError?: boolean }> }
+/** The text of an MCP tool's result. */
+function mcpText(r: { content?: unknown }): string {
+  if (!Array.isArray(r.content)) return ''
+  return r.content.map(b => (b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
+}
 /**
- * Opens the view in the desktop app's browser pane with at most one user-visible step. What needs no model turn is
- * done without one: a live, current, displayed view is left alone (a status says so); a displayed page that is stale
- * or frozen is told to reload through its next heartbeat answer. Otherwise the press (or /abyssal-eye) submits a
- * single prompt in the person's own words that asks the model to call the pane's tools, so in every permission
- * mode the calls are the user's own request (no permission hook, no setting touched). The chat shows only the short
- * line; the steps ride along as context the person never sees (attached by this plugin's own prompt.submit hook),
- * with the call that shows the view first, and the model is asked to answer with one glyph. The server is checked
- * first (and found again if it moved). Resolves '' when handled, else why not (no pane here, no server, a refusal),
- * so the caller falls back to the system browser.
+ * Shows the view in the desktop app's browser pane by calling the pane's own tools over the engine's connection to
+ * its MCP server (no model turn, nothing in the chat): one tab, reloaded in place when the pane is displayed, else
+ * opened afresh (which reveals the pane) with any other Abyssal Eye tab closed. Tabs of other origins are never
+ * touched. Resolves '' when done, else why not, so the caller can fall back.
  */
-async function openInPane($: { http: Http; ui: { status: (s: string) => void; toast: (s: string, o?: { timeoutMs?: number }) => void }; tool: { list: () => Promise<{ name: string }[]> }; prompt: { submit: (a: PromptSubmitArgs) => Promise<PromptSubmitResult> } }): Promise<string> {
+async function openDirect($: { mcp: Mcp }): Promise<string> {
+  const u = url + '?pane=1'
+  const ctx = await $.mcp.call('Claude_Browser', 'tabs_context', {})
+  if (ctx.isError) return 'tabs_context failed: ' + short(mcpText(ctx), 100)
+  const said = mcpText(ctx)
+  const m = /\{[\s\S]*"tabs"[\s\S]*?\]\s*\}/.exec(said)
+  const tabs = ((m ? JSON.parse(m[0]) : {}).tabs ?? []) as { tabId: string; origin?: string; isActive?: boolean }[]
+  const mine = tabs.filter(t => typeof t.origin === 'string' && /^http:\/\/(localhost|127\.0\.0\.1):73[1-4]\d$/.test(t.origin))
+  const shown = !/hidden/i.test(m ? said.replace(m[0], '') : said)
+  let keep = ''
+  if (mine.length && shown) {
+    keep = (mine.find(t => t.isActive) ?? mine[0]).tabId
+    const nav = await $.mcp.call('Claude_Browser', 'navigate', { url: u, tabId: keep })
+    if (nav.isError) keep = ''
+  }
+  if (!keep) {
+    const started = await $.mcp.call('Claude_Browser', 'preview_start', { url: u })
+    if (started.isError) return 'preview_start failed: ' + short(mcpText(started), 100)
+    keep = (/"tabId"\s*:\s*"([^"]+)"/.exec(mcpText(started)) ?? [])[1] ?? ''
+  }
+  if (keep) for (const t of mine) if (t.tabId !== keep) await $.mcp.call('Claude_Browser', 'tabs_close', { tabId: t.tabId }).catch(() => undefined)
+  return ''
+}
+/**
+ * Opens the view in the desktop app's browser pane. What needs nothing is left alone: a live, current, displayed
+ * view stays as it is (a status says so); a displayed page that is stale is told to reload through its next
+ * heartbeat answer. Otherwise the pane's own tools are called directly (openDirect). Only if that is not possible
+ * does the press (or /abyssal-eye) submit one short prompt in the person's own words, with the steps attached as
+ * context the person never sees, so that Claude opens the pane in a turn the person asked for. The server is
+ * checked first (and found again if it moved). Resolves '' when handled, else why not (no pane here, no server, a
+ * refusal), so the caller falls back to the system browser.
+ */
+async function openInPane($: { http: Http; mcp: Mcp; ui: { status: (s: string) => void }; tool: { list: () => Promise<{ name: string }[]> }; prompt: { submit: (a: PromptSubmitArgs) => Promise<PromptSubmitResult> } }): Promise<string> {
   // a repeated press while an open is pending adds nothing (no second prompt): the status says so
   if (opening) { $.ui.status('⛧ still summoning the Eye…'); return '' }
   setOpening(true)
-  $.ui.status('⛧ The abyss awaits…'); $.ui.toast('⛧ The abyss awaits…', { timeoutMs: 2500 })
+  $.ui.status('⛧ The abyss awaits…')
   // the server first: a lost or moved server is found again before the address is built
   const ok = port ? await $.http.fetch('http://127.0.0.1:' + port + '/hello').then(r => r.ok, () => false) : false
   if (!ok) { port = 0; if (reconnect) await reconnect() }
@@ -166,13 +175,17 @@ async function openInPane($: { http: Http; ui: { status: (s: string) => void; to
   const st = await seenState($)
   // nothing to do: the view is up, current and displayed
   if (st.alive === 1 && st.visible >= 1 && st.current >= 1) { setOpening(false); $.ui.status('⛧ Abyssal Eye is open'); return '' }
-  // a displayed page that is stale reloads itself when told through its next heartbeat: no model needed
+  // a displayed page that is stale reloads itself when told through its next heartbeat
   if (st.alive === 1 && st.visible >= 1) {
     await $.http.fetch('http://127.0.0.1:' + port + '/seen?p=' + encodeURIComponent(project.key) + '&reload=1').catch(() => undefined)
     openWatch = Date.now()
     $.ui.status('⛧ Abyssal Eye is refreshing')
     return ''
   }
+  // the pane's own tools, directly
+  const direct = await openDirect($).catch(err => 'the pane call failed: ' + short(String(err), 100))
+  if (!direct) { openWatch = Date.now(); return '' }
+  // the fallback: one prompt, so Claude opens the pane in a turn the person asked for
   const names = await $.tool.list().then(l => l.map(t => t.name)).catch(() => [] as string[])
   const start = names.find(n => /Browser__preview_start$/.test(n))
   if (start) PANE = start.slice(0, start.length - 'preview_start'.length)
@@ -183,6 +196,21 @@ async function openInPane($: { http: Http; ui: { status: (s: string) => void; to
   const r = await $.prompt.submit({ text: OPEN_TEXT, asUser: true }).catch(err => ({ drop: String(err) }) as PromptSubmitResult)
   if (r && 'drop' in r && r.drop) { pendingOpen = ''; setOpening(false); return 'prompt refused: ' + String(r.drop) }
   return ''
+}
+
+/** A mapped file changed on disk outside Claude's own edits: read it again and report the difference. */
+async function refreshFile($: { fs: { stat: (p: string) => Promise<{ size?: number; mtimeMs: number }>; read: (p: string) => Promise<string> } }, rel: string, now: number): Promise<void> {
+  const st = await $.fs.stat(tr.abs(rel)).catch(() => undefined)
+  const old = tr.mtimes.get(rel)
+  if (!st) { if (old !== undefined) { tr.mtimes.delete(rel); tr.setFile(rel, undefined, false) } return }
+  if (old === st.mtimeMs) return
+  tr.mtimes.set(rel, st.mtimeMs)
+  if (old === undefined || now - (touched.get(rel) ?? 0) < 6000) return
+  const text = await readSource($, tr.abs(rel))
+  if (text === undefined) return
+  const d = tr.setFile(rel, text, false)
+  const at = tr.locate(rel)
+  if (at.node) tr.emit({ type: 'ext', node: at.node, added: d.added, removed: d.removed })
 }
 
 /** Reads a source file for analysis, unless it is too large to be worth it (the stat comes first). */
@@ -197,7 +225,20 @@ function short(s: string, n: number): string {
   return one.length > n ? one.slice(0, n - 1) + '…' : one
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // the plugin's settings (/config): update check, earlier sessions, and the view's defaults for a new viewer
+  const optUpdate = options.updateCheck === true
+  const optHistory = options.history === true
+  const optQuality = typeof options.quality === 'string' ? options.quality : 'medium'
+  const optMotion = typeof options.motion === 'string' ? options.motion : 'full'
+  // earlier sessions seed the map: from the setting, the environment, or the viewer pressing H
+  let historyWanted = false
+  // a newer published version, and whether its update is running
+  let updateAvail = ''
+  let updating = false
+  // the model the session itself runs on, as /model shows it, when the engine tells
+  let mainModel = ''
+
   on('session.start', async ($, e, next) => {
     // the platform decides where perl is and how the browser opens; the server is the same perl script everywhere
     const osEnv = (await $.env.get('OS').catch(() => undefined)) || ''
@@ -229,10 +270,11 @@ export const register: Register = on => {
     const norm = tr.root.replace(/\\/g, '/').replace(/\/$/, '')
     project.name = norm.slice(norm.lastIndexOf('/') + 1) || 'project'
     project.key = slug(project.name) + '-' + (fnv(norm.toLowerCase()) % 46656).toString(36).padStart(3, '0')
-    me.session = ((await $.session.id().catch(() => '')) || String(Date.now())).replace(/[^\w-]/g, '').slice(0, 8)
-    me.main = me.session + ':main'
-
     const sessionId = await $.session.id().catch(() => '')
+    me.session = (sessionId || String(Date.now())).replace(/[^\w-]/g, '').slice(0, 8)
+    me.main = me.session + ':main'
+    mainModel = (await $.session.model().catch(() => '')) || ''
+
     const cwd = await $.session.cwd().catch(() => '')
     const home = (await $.env.get('USERPROFILE').catch(() => undefined)) || (await $.env.get('HOME').catch(() => undefined)) || ''
     const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) || home + '/.claude'
@@ -255,15 +297,15 @@ export const register: Register = on => {
     }
     const steps = history.flatMap(rec => rec.moments.map(m => ({ actor: rec.actor, m }))).sort((a, b) => a.m.t - b.m.t).slice(-4000)
     const t0 = steps.length ? steps[0].m.t - 1 : Date.now()
-    tr.emit({ type: 'hello', root: tr.root }, t0)
-    tr.emit({ type: 'actor', id: me.main, label: 'Claude' }, t0)
+    tr.emit({ type: 'hello', root: tr.root, quality: optQuality, motion: optMotion }, t0)
+    tr.emit({ type: 'actor', id: me.main, label: 'Claude', ...(mainModel ? { model: mainModel } : {}) }, t0)
     const open = new Map<string, number>()
     // which call summoned which subagent: the Agent call's prompt is the subagent's first prompt
-    const summons = new Map<string, { actor: string; id: string; label?: string; role?: string }>()
+    const summons = new Map<string, { actor: string; id: string; label?: string; role?: string; model?: string }>()
     for (const { actor, m } of steps) {
       if (m.type === 'use' && kindOf(m.tool) === 'agent') {
         const p = str(m.input, 'prompt')
-        if (p) summons.set(p.slice(0, 300), { actor, id: m.id, label: str(m.input, 'description'), role: roleOf(m.input) })
+        if (p) summons.set(p.slice(0, 300), { actor, id: m.id, label: str(m.input, 'description'), role: roleOf(m.input), model: str(m.input, 'model') })
       }
     }
     for (const { actor, m } of steps) {
@@ -274,13 +316,13 @@ export const register: Register = on => {
         const from = task ? summons.get(task.slice(0, 300)) : undefined
         const parent = from?.actor ?? me.main
         tr.emit({ type: 'actor', id: actor, label: short(from?.label ?? task ?? 'thrall', 40), parent, by: parent === me.main ? 'Claude' : 'a thrall',
-          ...(task ? { task: short(task, 160) } : {}), ...(from ? { spawn: from.id } : {}), ...(from?.role ? { role: from.role } : {}) }, m.t)
+          ...(task ? { task: short(task, 160) } : {}), ...(from ? { spawn: from.id } : {}), ...(from?.role ? { role: from.role } : {}), ...(from?.model ? { model: from.model } : {}) }, m.t)
       }
       if (m.type === 'prompt') {
         if (actor === me.main) tr.emit({ type: 'prompt', text: short(m.text, 80), by: 'you', actor: me.main }, m.t)
       } else if (m.type === 'use') {
         const kind = kindOf(m.tool)
-        const path = str(m.input, 'file_path') ?? str(m.input, 'notebook_path') ?? str(m.input, 'path')
+        const path = str(m.input, 'file_path') ?? str(m.input, 'notebook_path') ?? str(m.input, 'path') ?? str(m.input, 'filePath')
         const rel = tr.rel(path)
         let text: string | undefined
         if (tr.tracked(rel) && path && kind !== 'bash') {
@@ -333,20 +375,26 @@ export const register: Register = on => {
       if (!picks.length) return
       const first = Math.min(...picks.map(p => p[1].first))
       tr.emit({ type: 'actor', id: 'history:main', label: 'Earlier sessions' }, first - 2)
-      for (const [rel, t] of picks.sort((a, b) => a[1].first - b[1].first)) {
-        if (tr.known(rel)) continue
-        const text = await readSource($, t.path)
-        if (text === undefined) continue
-        tr.setFile(rel, text, true, t.first - 1)
-        const at = tr.locate(rel)
-        if (at.node) tr.emit({ type: 'glance', actor: 'history:main', node: at.node }, t.last)
-      }
+      // all files are set first, then their bindings are worked out once
+      let latest = first
+      tr.batching = true
+      try {
+        for (const [rel, t] of picks.sort((a, b) => a[1].first - b[1].first)) {
+          if (tr.known(rel)) continue
+          const text = await readSource($, t.path)
+          if (text === undefined) continue
+          tr.setFile(rel, text, true, t.first - 1)
+          if (t.first > latest) latest = t.first
+          const at = tr.locate(rel)
+          if (at.node) tr.emit({ type: 'glance', actor: 'history:main', node: at.node }, t.last)
+        }
+      } finally { tr.endBatch(true, latest) }
     }
     tr.hold = true; tr.replaying = true
     // earlier sessions seed the map only when asked for: ABYSSAL_EYE_HISTORY=1, or the view's H key (kept in the
     // viewer's browser and told through the server while the view is open); the seed runs once per session
     let seeded = false
-    historyWanted = (await $.env.get('ABYSSAL_EYE_HISTORY').catch(() => undefined)) === '1'
+    historyWanted = optHistory || (await $.env.get('ABYSSAL_EYE_HISTORY').catch(() => undefined)) === '1'
     const seedHistory = () => { if (seeded) return; seeded = true; void earlier().catch(() => undefined) }
     void replay().catch(() => undefined).then(() => { tr.replaying = false; tr.release() }).then(() => { if (historyWanted) seedHistory() })
 
@@ -379,7 +427,7 @@ export const register: Register = on => {
           // skips the lines it already holds, so a surviving server gets no duplicates
           port = p
           url = 'http://localhost:' + port + '/p/' + project.key + '/'
-          tr.sent = 0
+          tr.resetSent()
           $.ui.status('⛧ Abyssal Eye ' + url)
           $.ui.invalidate('ui.render')
         } else $.ui.status('⛧ Abyssal Eye could not start its server')
@@ -391,10 +439,8 @@ export const register: Register = on => {
     // the daily update check, off the critical path and silent when anything fails; ABYSSAL_EYE_NO_UPDATE_CHECK=1
     // (or Claude Code's own non-essential traffic switch) turns it off
     const checkUpdate = async () => {
-      // the shipped config.json can turn the check off for a whole distribution
-      let cfg: { updateCheck?: boolean } = {}
-      try { cfg = JSON.parse(await $.fs.read($.plugin.root.replace(/[\\/]+$/, '') + '/config.json').catch(() => '{}')) as typeof cfg } catch { cfg = {} }
-      if (cfg.updateCheck !== true) return
+      // the plugin's "Update check" setting (its default comes from the manifest, so a distribution can ship it off)
+      if (!optUpdate) return
       if ((await $.env.get('ABYSSAL_EYE_NO_UPDATE_CHECK').catch(() => undefined)) === '1') return
       if (await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC').catch(() => undefined)) return
       const installed = versionFromManifest(await $.fs.read($.plugin.root.replace(/[\\/]+$/, '') + '/.claude-plugin/plugin.json').catch(() => '')) || ''
@@ -416,9 +462,9 @@ export const register: Register = on => {
     // stream new events to the server
     const q = () => '?p=' + encodeURIComponent(project.key) + '&s=' + encodeURIComponent(me.session) + '&i=' + me.instance + '&name=' + encodeURIComponent(project.name)
     // refused: another copy of the plugin owns this session's stream; try again later in case it went away
-    const refused = () => { passiveUntil = Date.now() + 30_000; tr.sent = 0 }
+    const refused = () => { passiveUntil = Date.now() + 30_000; tr.resetSent() }
     // the server is gone (refused, timed out, or answering with anything but ok or 409): find or start one and replay
-    const dead = () => { port = 0; tr.sent = 0; void connect() }
+    const dead = () => { port = 0; tr.resetSent(); void connect() }
     $.clock.every(FLUSH_MS, () => {
       try {
         if (!port || pushing || Date.now() < passiveUntil) return
@@ -426,12 +472,12 @@ export const register: Register = on => {
         if (!batch) return
         pushing = true
         const n = batch.split('\n').length
-        const from = tr.sent
+        const from = tr.from()
         $.http.fetch('http://127.0.0.1:' + port + '/push' + q() + '&from=' + from, { method: 'POST', body: batch, headers: { 'content-type': 'text/plain' } })
           .then(r => {
-            if (r.ok) { if (tr.sent === from) tr.sent += n }
+            if (r.ok) { if (tr.from() === from) tr.sent += n }
             else if (r.status === 409) refused()
-            else if (r.status === 410) tr.sent = 0 // the server holds less than we thought: replay from the start
+            else if (r.status === 410) tr.resetSent() // the server holds less than we thought: replay from the start
             else dead()
           }, dead)
           .finally(() => { pushing = false })
@@ -442,7 +488,7 @@ export const register: Register = on => {
       if (!openWatch) { openWarned = false; return }
       void seenState($).then(st => {
         if (!openWatch) return
-        if (st.visible >= 1 && st.latest >= openWatch) { openWatch = 0; setOpening(false); $.ui.status('⛧ The Eye is open'); $.ui.toast('⛧ The Eye is open', { timeoutMs: 2500 }); return }
+        if (st.visible >= 1 && st.latest >= openWatch) { openWatch = 0; setOpening(false); $.ui.status('⛧ The Eye is open'); return }
         // the page is alive but not shown: the pane is minimized or behind another tab; say so once, ask for nothing more
         if (st.alive >= 1 && st.latest >= openWatch && Date.now() - openWatch > 3000 && !openWarned) {
           openWarned = true
@@ -472,23 +518,16 @@ export const register: Register = on => {
       } catch { dead() }
     })
 
-    // notice changes the human makes to files already on the map
+    // notice changes the human makes to files already on the map (one pass at a time: a slow disk never stacks passes)
+    let polling = false
     $.clock.every(POLL_MS, () => {
+      if (polling) return
+      polling = true
       void (async () => {
-        const now = Date.now()
-        for (const rel of [...tr.files.keys()]) {
-          const st = await $.fs.stat(tr.abs(rel)).catch(() => undefined)
-          const old = tr.mtimes.get(rel)
-          if (!st) { if (old !== undefined) { tr.mtimes.delete(rel); tr.setFile(rel, undefined, false) } continue }
-          if (old === st.mtimeMs) continue
-          tr.mtimes.set(rel, st.mtimeMs)
-          if (old === undefined || now - (touched.get(rel) ?? 0) < 6000) continue
-          const text = await readSource($, tr.abs(rel))
-          if (text === undefined) continue
-          const d = tr.setFile(rel, text, false)
-          const at = tr.locate(rel)
-          if (at.node) tr.emit({ type: 'ext', node: at.node, added: d.added, removed: d.removed })
-        }
+        try {
+          const now = Date.now()
+          for (const rel of [...tr.files.keys()]) await refreshFile($, rel, now)
+        } finally { polling = false }
       })()
     })
     return next(e)
@@ -509,7 +548,7 @@ export const register: Register = on => {
     const { Box, Button } = $.ui.resolve(e)
     return (
       <Box>
-        <Button key="open-scope" label={opening ? '⛧ summoning…' : '⛧ Abyssal Eye'} plain dimColor onPress={() => {
+        <Button key="open-view" label={opening ? '⛧ summoning…' : '⛧ Abyssal Eye'} plain dimColor onPress={() => {
           if (Date.now() - lastOpen < 2000) return
           lastOpen = Date.now()
           void openInPane($).then(why => {
@@ -541,25 +580,47 @@ export const register: Register = on => {
     )
   })
 
-  // the open prompt this plugin submitted carries its instructions as context the person never sees
+  // the open prompt this plugin submitted (the fallback path) carries its steps as context the person never sees;
+  // every other prompt passes through untouched
   on('prompt.submit', async ($, e, next) => {
     if (!pendingOpen || e.text !== OPEN_TEXT || e.origin.kind !== 'plugin') return next(e)
     const c = pendingOpen; pendingOpen = ''
     return next({ ...e, context: [...(e.context ?? []), c] })
   }).catch(($, e, next) => next(e))
 
-  // the standing note in the conversation's context: what the open line means, so any turn knows what to do with it
-  on('prompt.context', async ($, e, next) => {
-    // the standing note in the conversation's context: what the open line means. next runs exactly once; a fault
-    // after it leaves the blocks as they came
+  // a subagent starts: who it is, what it was asked and which call summoned it are known exactly here
+  on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
     try {
-      if (unsupported || !r || !Array.isArray(r.blocks)) return r
-      const neutral: SeenState = { alive: 0, visible: 0, current: 0, latest: 0 }
-      const steps = url ? openSteps(neutral, false) : 'Call the browser pane\'s preview_start tool with the view address the Abyssal Eye status line shows, make no other tool calls, and reply with exactly the single character ⛧.'
-      return { ...r, blocks: [...r.blocks, { name: 'abyssalEye', text: 'The Abyssal Eye plugin adds a button that sends the message "' + OPEN_TEXT + '". When the user\'s message is exactly that line: ' + steps }] }
-    } catch { return r }
+      if (r.agentId) {
+        const actor = me.session + ':' + r.agentId
+        const parent = e.parentAgentId ? me.session + ':' + e.parentAgentId : me.main
+        const role = roleOf({ subagent_type: e.subagentType, description: e.description, prompt: e.prompt })
+        const model = r.model || e.model
+        const th: Thrall = { label: short(e.description || e.subagentType || 'thrall', 40), parent, spawn: e.tool_use_id, ...(e.prompt ? { task: short(e.prompt, 160) } : {}), ...(role ? { role } : {}), ...(model ? { model } : {}) }
+        spawned.set(r.agentId, th)
+        if (!actors.has(actor)) {
+          actors.add(actor)
+          tr.emit({ type: 'actor', id: actor, label: th.label, parent, by: parent === me.main ? 'Claude' : 'a thrall',
+            ...(th.task ? { task: th.task } : {}), ...(th.spawn ? { spawn: th.spawn } : {}), ...(th.role ? { role: th.role } : {}), ...(th.model ? { model: th.model } : {}) })
+        }
+      }
+    } catch { /* the spawn itself is done; the map can do without this */ }
+    return r
   })
+
+  // a subagent is done: its exact end
+  on('classic.SubagentStop', async ($, e, next) => {
+    if (e.agent_id) tr.emit({ type: 'idle', actor: me.session + ':' + e.agent_id })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // a watched file changed on disk: a mapped one is read again at once (the 4 s poll remains as the net)
+  on('classic.FileChanged', async ($, e, next) => {
+    const rel = tr.rel(e.file_path)
+    if (rel && tr.known(rel)) void refreshFile($, rel, Date.now()).catch(() => undefined)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // the turn is over: Claude has nothing more to do until the human speaks again
   on('turn.complete', async ($, e, next) => { if (!e.agentId) turnBusy = false; tr.emit({ type: 'idle', actor: me.main }); return next(e) }).catch(($, e, next) => next(e))
@@ -576,9 +637,10 @@ export const register: Register = on => {
 
   // the permission dialog is up: the call it asks about now waits on the human
   on('classic.PermissionRequest', async ($, e, next) => {
-    for (let i = openCalls.length - 1; i >= 0; i--) {
-      if (openCalls[i].tool === e.tool_name) { tr.emit({ type: 'act-wait', id: openCalls[i].id }); break }
-    }
+    // the open call the dialog asks about: same tool, and the same input when several calls of that tool are open
+    const same = openCalls.filter(c => c.tool === e.tool_name)
+    const hit = [...same].reverse().find(c => sameCall(c.input, e.tool_input)) ?? same[same.length - 1]
+    if (hit) tr.emit({ type: 'act-wait', id: hit.id })
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -612,13 +674,22 @@ export const register: Register = on => {
     const actor = e.agentId ? me.session + ':' + e.agentId : me.main
     if (actor !== me.main && !actors.has(actor)) {
       actors.add(actor)
-      // a subagent grows from whoever summoned it, and from the very act that summoned it
-      const th = thralls.shift()
+      // a subagent grows from whoever summoned it, and from the very act that summoned it: known from its spawn,
+      // else from the engine's list of agents, else (older engines) taken in order of asking
+      let th: Thrall | undefined = e.agentId ? spawned.get(e.agentId) : undefined
+      if (!th && e.agentId) {
+        const info = (await $.agent.list().catch(() => [])).find(a => a.id === e.agentId)
+        if (info) {
+          const role = roleOf({ subagent_type: info.type, description: info.description })
+          th = { label: short(info.description || info.type || 'thrall', 40), parent: info.parentId ? me.session + ':' + info.parentId : me.main, spawn: '', ...(role ? { role } : {}) }
+        }
+      }
+      if (!th) th = thralls.shift()
       const parent = th?.parent ?? me.main
       tr.emit({ type: 'actor', id: actor, label: th?.label ?? 'thrall', parent, by: parent === me.main ? 'Claude' : 'a thrall',
-        ...(th?.task ? { task: th.task } : {}), ...(th?.spawn ? { spawn: th.spawn } : {}), ...(th?.role ? { role: th.role } : {}) })
+        ...(th?.task ? { task: th.task } : {}), ...(th?.spawn ? { spawn: th.spawn } : {}), ...(th?.role ? { role: th.role } : {}), ...(th?.model ? { model: th.model } : {}) })
     }
-    const path = str(e, 'file_path') ?? str(e, 'notebook_path') ?? str(e, 'path')
+    const path = str(e, 'file_path') ?? str(e, 'notebook_path') ?? str(e, 'path') ?? str(e, 'filePath')
     const rel = tr.rel(path)
     const id = e.tool_use_id ?? tool + Date.now()
 
@@ -637,7 +708,7 @@ export const register: Register = on => {
     let detail: string | undefined
     let pending: string[] = []
     if (kind === 'read') {
-      at = tr.locate(rel, Number(arg(e, 'offset') ?? 0) || undefined)
+      at = tr.locate(rel, Number(arg(e, 'offset') ?? arg(e, 'line') ?? 0) || undefined)
       detail = rel ?? path
     } else if (kind === 'edit' || kind === 'write') {
       detail = rel ?? path
@@ -666,22 +737,31 @@ export const register: Register = on => {
       detail = short(str(e, 'description') ?? str(e, 'subagent_type') ?? 'a thrall', 40)
       const task = str(e, 'prompt')
       const role = roleOf(e)
-      thralls.push({ label: detail, parent: actor, spawn: id, ...(task ? { task: short(task, 160) } : {}), ...(role ? { role } : {}) })
+      const model = str(e, 'model')
+      thralls.push({ label: detail, parent: actor, spawn: id, ...(task ? { task: short(task, 160) } : {}), ...(role ? { role } : {}), ...(model ? { model } : {}) })
     } else if (kind === 'web') detail = short(str(e, 'url') ?? str(e, 'query') ?? '', 80)
 
-    const command = str(e, 'command')
-    const look = kind === 'bash' ? !!command && looksOnly(command) : kind === 'tool' ? LOOK_TOOL.test(tool) : false
+    const told = describe(kind, tool, e, rel ?? path)
+    detail = detail || told.detail
+    const look = told.look
     tr.emit({ type: 'act', id, actor, kind, tool, ...at, ...(detail ? { detail } : {}), ...(look ? { look } : {}) })
-    openCalls.push({ id, tool })
+    openCalls.push({ id, tool, input: e })
+    // while an edit of Claude's own is open (it may wait long on a permission), a change to its file is its own,
+    // never an outside edit: the file-change hook and the poller leave it to the lines below
+    const writes = (kind === 'edit' || kind === 'write') && rel !== undefined
+    if (writes && rel) touched.set(rel, Date.now() + 3600000)
     let ran
     try {
       ran = await next(e)
     } finally {
+      if (writes && rel) touched.set(rel, Date.now())
       const i = openCalls.findIndex(c => c.id === id)
       if (i >= 0) openCalls.splice(i, 1)
     }
     // the tool has run: a fault from here on must never run it again (the hook's catch would), so it is swallowed
     try {
+    // the engine's own word that the call changed nothing corrects a guess that it might have
+    const seen = !look && (ran as { isReadOnly?: boolean }).isReadOnly === true && kind !== 'edit' && kind !== 'write' && kind !== 'agent' ? { look: true } : {}
     const failed = ran.deny !== undefined || ran.isError === true
 
     if ((kind === 'edit' || kind === 'write') && tr.tracked(rel) && path) {
@@ -699,7 +779,7 @@ export const register: Register = on => {
         tr.emit({ type: 'act-end', id, failed: true })
       }
     } else {
-      tr.emit({ type: 'act-end', id, ...(failed ? { failed: true } : {}) })
+      tr.emit({ type: 'act-end', id, ...(failed ? { failed: true } : {}), ...seen })
       // glance at what a search turned up, bringing those files onto the map
       if (kind === 'search' && !failed && typeof ran.text === 'string') {
         let n = 0
@@ -718,7 +798,7 @@ export const register: Register = on => {
         }
       }
     }
-    } catch { /* the scope's own fault, after the tool */ }
+    } catch { /* the plugin's own fault, after the tool */ }
     return ran
-  }).catch(($, e, next) => next(e)) // a fault in the scope before the tool must never block it
+  }).catch(($, e, next) => next(e)) // a fault in the plugin before the tool must never block it
 }

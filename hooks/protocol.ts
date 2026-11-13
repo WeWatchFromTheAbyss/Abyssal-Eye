@@ -13,7 +13,7 @@ export type Member = { name: string; start: number; end: number; cb?: boolean } 
 
 export type Ev = { seq: number; t: number } & (
   // first event of a stream; root is the project folder
-  | { type: 'hello'; root: string }
+  | { type: 'hello'; root: string; quality?: string; motion?: string } // quality (low, medium, high) and motion (off, calm, full): the view's defaults for a viewer who has chosen none
   // a type (class, struct, module of functions...) appeared or changed. Upsert by id. folder = its directory, relative.
   | { type: 'node'; id: string; name: string; file: string; folder: string; kind: NodeKind; members: Member[]; lines: number }
   | { type: 'node-gone'; id: string }
@@ -24,12 +24,14 @@ export type Ev = { seq: number; t: number } & (
   // task: what it was asked to do (a subagent's prompt excerpt); by: who gave it
   // role: 'inspector' for a subagent summoned to review, verify, inspect, audit or check (derived from its agent type,
   // description and the first line of its prompt); the view draws it as TheyEye, and as a pyramid when absent
-  | { type: 'actor'; id: string; label: string; parent?: string; task?: string; by?: string; spawn?: string; role?: 'inspector' } // spawn: id of the agent act that summoned it
+  // model: the model it runs on, when known (an alias such as "fable" or a full id); the view draws an actor on
+  // Fable with a fringe of face tentacles, and a subagent with no model of its own as its parent
+  | { type: 'actor'; id: string; label: string; parent?: string; task?: string; by?: string; spawn?: string; role?: 'inspector'; model?: string } // spawn: id of the agent act that summoned it
   // a tool call began. node/member: the exact type and method it targets, when known.
   // look: the act only looks (a read-only shell command, a lookup tool), so it is drawn as an eye stalk, never a tentacle.
   | { type: 'act'; id: string; actor: string; kind: ActKind; tool: string; node?: string; member?: string; detail?: string; look?: boolean }
   | { type: 'act-wait'; id: string } // the call is waiting on the human's permission
-  | { type: 'act-end'; id: string; failed?: boolean; added?: number; removed?: number; node?: string; member?: string }
+  | { type: 'act-end'; id: string; failed?: boolean; added?: number; removed?: number; node?: string; member?: string; look?: boolean } // look: the engine says the call changed nothing
   // the model is thinking (between tool calls)
   | { type: 'think'; actor: string; on: boolean }
   // the session's turn ended: Claude is done and waits for the human (not emitted while a permission dialog is up)

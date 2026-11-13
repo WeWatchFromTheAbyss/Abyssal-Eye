@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { analyze, computeEdges, isTracked } from './analyzer'
-import { looksOnly, LOOK_TOOL } from './classify'
+import { describe, kindOf, looksOnly, LOOK_TOOL } from './classify'
 import { parseTranscript, projectSlug } from './backfill'
 import { Tracker } from './tracker'
 import { isNewer, versionFromManifest } from './update'
@@ -426,4 +426,72 @@ test('a project folder is slugged the way Claude Code names its transcript folde
   expect(projectSlug('/Users/someone/proj')).toBe('-Users-someone-proj')
   expect(projectSlug('/home/someone/my.app')).toBe('-home-someone-my-app')
   expect(projectSlug('C:\\Projects\\Example')).toBe('C--Projects-Example')
+})
+
+test('tools map to the right kind of act, with a description and a look', () => {
+  expect(kindOf('Read')).toBe('read')
+  expect(kindOf('LSP')).toBe('read')
+  expect(kindOf('MultiEdit')).toBe('edit')
+  expect(kindOf('LS')).toBe('search')
+  expect(kindOf('BashOutput')).toBe('bash')
+  expect(kindOf('Task')).toBe('agent')
+  expect(kindOf('Workflow')).toBe('agent')
+  expect(kindOf('mcp__memory__memory_write')).toBe('edit')
+  expect(kindOf('mcp__Claude_Browser__navigate')).toBe('web')
+  expect(kindOf('mcp__claude-in-chrome__computer')).toBe('web')
+  expect(kindOf('mcp__computer-use__screenshot')).toBe('web')
+  expect(kindOf('Skill')).toBe('tool')
+  for (const t of ['ListSkills', 'ListPlugins', 'ListConnectors', 'SearchSkills', 'SearchPlugins', 'SearchMcpRegistry', 'GetTask', 'ListMcpResourcesTool',
+    'ReadMcpResourceTool', 'ReadWidgetContext', 'Poll', 'Monitor', 'LSP', 'AskUserQuestion', 'WaitForMcpServers', 'ToolSearch', 'mcp__x__list_events']) {
+    expect([t, LOOK_TOOL.test(t)]).toEqual([t, true])
+  }
+  for (const t of ['Skill', 'SendMessage', 'mcp__x__create_event', 'Artifact']) expect([t, LOOK_TOOL.test(t)]).toEqual([t, false])
+  expect(describe('web', 'mcp__Claude_Browser__navigate', { url: 'http://localhost:3000/' }, undefined)).toEqual({ detail: 'http://localhost:3000/', look: false })
+  expect(describe('web', 'mcp__Claude_Browser__read_page', {}, undefined)).toEqual({ detail: 'read_page', look: true })
+  expect(describe('web', 'mcp__claude-in-chrome__computer', { action: 'screenshot' }, undefined)).toEqual({ detail: 'screenshot', look: true })
+  expect(describe('web', 'mcp__claude-in-chrome__computer', { action: 'left_click' }, undefined).look).toBe(false)
+  expect(describe('web', 'mcp__computer-use__zoom', {}, undefined).look).toBe(true)
+  expect(describe('web', 'mcp__computer-use__type', { text: 'hello' }, undefined).look).toBe(false)
+  expect(describe('tool', 'Skill', { skill: 'code-review' }, undefined)).toEqual({ detail: 'code-review', look: false })
+  expect(describe('tool', 'SendMessage', { to: 'Explorer' }, undefined)).toEqual({ detail: 'Explorer', look: false })
+  expect(describe('bash', 'Bash', { command: 'git status' }, undefined)).toEqual({ detail: 'git status', look: true })
+  expect(describe('read', 'Read', {}, 'A/Player.cs')).toEqual({ detail: 'A/Player.cs', look: false })
+})
+
+test('the tracker signs only what changed, batches a seed, and a denied proposal leaves the map as it was', () => {
+  const tr = new Tracker()
+  tr.root = '/proj'
+  tr.setFile('A/Base.cs', 'class Base { void Go() { } }', true)
+  tr.setFile('B/Child.cs', 'class Child : Base { void Run() { } }', true)
+  const nodes = () => tr.log.filter(e => e.type === 'node').length
+  const before = nodes()
+  // a change to one file emits that file's node only
+  tr.setFile('B/Child.cs', 'class Child : Base { void Run() { } void Stop() { } }', false)
+  expect(nodes()).toBe(before + 1)
+  // an unchanged file emits nothing
+  tr.setFile('A/Base.cs', 'class Base { void Go() { } }', false)
+  expect(nodes()).toBe(before + 1)
+
+  // a proposal that would turn Base (and so Child) into behaviours must not change the real kinds
+  const kinds = () => [tr.files.get('A/Base.cs')?.types[0]?.kind, tr.files.get('B/Child.cs')?.types[0]?.kind]
+  const was = kinds()
+  const pending = tr.propose('A/Base.cs', 'class Base : MonoBehaviour { void Go() { } }')
+  tr.settle(pending)
+  expect(kinds()).toEqual(was)
+
+  // a batch works its bindings out once, at the end
+  const edges = () => tr.log.filter(e => e.type === 'edge' && e.state === 'live').length
+  const had = edges()
+  tr.batching = true
+  tr.setFile('C/Hud.cs', 'class Hud { void Show() { Dock.Pin(); } }', true)
+  tr.setFile('C/Dock.cs', 'class Dock { void Pin() { } }', true)
+  expect(edges()).toBe(had)
+  tr.endBatch(true)
+  expect(edges()).toBe(had + 1)
+
+  // the server's count is the log's own until a reset starts it over
+  tr.sent = tr.log.length
+  expect(tr.from()).toBe(tr.log.length)
+  tr.resetSent()
+  expect(tr.from()).toBe(0)
 })
