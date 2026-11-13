@@ -921,7 +921,9 @@ function parsePy(text: string, f: FileFacts, fileName: string): void {
 }
 
 // Unity: classes deriving from a behaviour become behaviours too
-export function resolveKinds(files: Map<string, FileFacts>): void {
+/** Marks classes that derive from a behaviour as behaviours. Returns the files whose types changed kind. */
+export function resolveKinds(files: Map<string, FileFacts>): Set<string> {
+  const touched = new Set<string>()
   const names = new Set<string>()
   for (const f of files.values()) for (const t of f.types) if (t.kind === 'behaviour') names.add(t.name)
   for (let pass = 0; pass < 6; pass++) {
@@ -931,11 +933,13 @@ export function resolveKinds(files: Map<string, FileFacts>): void {
         if (t.kind !== 'class' || !t.base || !names.has(t.base)) continue
         t.kind = 'behaviour'
         names.add(t.name)
+        touched.add(f.rel)
         changed = true
       }
     }
     if (!changed) break
   }
+  return touched
 }
 
 // "fromId\ntoId" for every type that mentions another type by name, plus includes and imports resolved to known

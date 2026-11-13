@@ -1,4 +1,4 @@
-// Abyssal Eye live view, part 3 of 4: limb chains, props, souls, camera, connections, cards and the well.
+// Abyssal Eye live view, part 3 of 5: limb chains, props, souls, camera, connections, cards and the well.
 'use strict'
 function chainStep(L, A, now, dt) {
   const M = Q() === 0 ? 24 : 32
@@ -23,7 +23,8 @@ function chainStep(L, A, now, dt) {
     const load = 1 / (1 + 0.6 * (L.load || 0))
     const vmax = (L.sm === 'approach' ? 520 : A.swimK > 0.5 ? 700 : 950) * load, amax = 2600 * load
     const dx = gx - L.hx, dy = gy - L.hy, d = Math.hypot(dx, dy) || 1e-6
-    const want = Math.min(vmax, Math.sqrt(2 * amax * d) * 0.9)
+    // (the last few pixels are a plain proportional approach, so the head settles instead of chattering)
+    const want = Math.min(vmax, Math.sqrt(2 * amax * d) * 0.9, d * 30)
     const tvx = dx / d * want, tvy = dy / d * want
     let ax = tvx - (L.hvx || 0), ay = tvy - (L.hvy || 0)
     const al = Math.hypot(ax, ay) || 1e-6, step = Math.min(al, amax * sdt)
@@ -317,75 +318,7 @@ function drawSkulls(now) {
 // follow-the-leader chain with inertia, so they trail the travel and swing on a turn, and a travelling wave runs
 // root to tip as if pulsing the body along: amplitude and frequency grow with speed, a slow sway at rest. They
 // shorten while the pyramid has been idle for a while and grow out again when it moves. One stroke each.
-const TEND_M = 9
-function tendrilStep(A, sdt, now) {
-  const q = Q(), mo = motion()
-  const count = q === 0 ? 0 : q === 1 ? 4 : 6
-  if (!count || A.alpha < 0.05) { A.tend = null; return }
-  const R = A.r * (A.bodyK || 1)
-  if (!A.tend || A.tend.length !== count) {
-    A.tend = []
-    for (let k = 0; k < count; k++) A.tend.push({ p: new Float64Array(TEND_M * 2), o: new Float64Array(TEND_M * 2), init: false, ph: k * 1.7 })
-  }
-  const spd = Math.hypot(A.vx, A.vy)
-  if (spd > 15) A.movedT = now
-  const idle = now - (A.movedT || 0)
-  // the reach: full while moving, shrinking to a stub after a while at rest
-  const want = idle < 4000 ? 1 : idle < 12000 ? 1 - 0.7 * (idle - 4000) / 8000 : 0.3
-  A.tendK = ease(A.tendK === undefined ? want : A.tendK, want, 1.2, sdt)
-  const len = R * 1.7 * A.tendK, seg = len / (TEND_M - 1)
-  const ca = Math.cos(A.tiltA || 0), sa = Math.sin(A.tiltA || 0)
-  const half = R * 1.1, base = R * 0.8
-  const damp = mo > 0.02 ? Math.exp(-6 * sdt) : 0
-  for (let k = 0; k < count; k++) {
-    const T = A.tend[k], p = T.p, o = T.o
-    // the root on the base edge, rotated with the body
-    const lx = -half * 0.8 + (k + 0.5) / count * half * 1.6, ly = base
-    const rx = A.x + lx * ca - ly * sa, ry = A.y + lx * sa + ly * ca
-    const dnx = -sa, dny = ca // the body's down direction
-    if (!T.init || mo <= 0.02 || !isFinite(p[0])) {
-      for (let i = 0; i < TEND_M; i++) { p[i * 2] = rx + dnx * seg * i; p[i * 2 + 1] = ry + dny * seg * i; o[i * 2] = p[i * 2]; o[i * 2 + 1] = p[i * 2 + 1] }
-      T.init = true
-      if (mo <= 0.02) continue
-    }
-    p[0] = rx; p[1] = ry
-    for (let i = 1; i < TEND_M; i++) {
-      // inertia: keep most of last frame's motion, then hang at segment length from the point before
-      const vx = (p[i * 2] - o[i * 2]) * damp, vy = (p[i * 2 + 1] - o[i * 2 + 1]) * damp
-      o[i * 2] = p[i * 2]; o[i * 2 + 1] = p[i * 2 + 1]
-      let x = p[i * 2] + vx, y = p[i * 2 + 1] + vy
-      // a gentle pull toward hanging down from the body, so a resting thread settles straight
-      x += (p[i * 2 - 2] + dnx * seg - x) * (0.12 * sdt * 60) * 0.5; y += (p[i * 2 - 1] + dny * seg - y) * (0.12 * sdt * 60) * 0.5
-      let dx = x - p[i * 2 - 2], dy = y - p[i * 2 - 1]
-      const d = Math.hypot(dx, dy) || 1e-6
-      p[i * 2] = p[i * 2 - 2] + dx / d * seg; p[i * 2 + 1] = p[i * 2 - 1] + dy / d * seg
-      if (!isFinite(p[i * 2]) || !isFinite(p[i * 2 + 1])) { T.init = false; break }
-    }
-  }
-}
-function drawTendrils(A, now) {
-  if (!A.tend) return
-  const z = view.cam.z, mo = motion()
-  const spd = Math.hypot(A.vx, A.vy)
-  const amp = (0.6 + Math.min(2.4, spd / 90)) * (A.tendK || 0), freq = 0.004 + Math.min(0.012, spd / 25000)
-  g.save()
-  g.strokeStyle = rgbaArr(rgb(A.tone), 0.3 * A.alpha); g.lineCap = 'round'; g.lineJoin = 'round'
-  const ca = Math.cos(A.tiltA || 0), sa = Math.sin(A.tiltA || 0)
-  for (const T of A.tend) {
-    const p = T.p
-    if (!isFinite(p[0])) continue
-    g.lineWidth = Math.max(0.6, 1.3 / Math.max(0.5, z))
-    g.beginPath(); g.moveTo(p[0], p[1])
-    for (let i = 1; i < TEND_M; i++) {
-      // the travelling wave, across the thread's own direction, growing toward the tip
-      const tx = p[i * 2] - p[i * 2 - 2], ty = p[i * 2 + 1] - p[i * 2 - 1], tl = Math.hypot(tx, ty) || 1
-      const w = Math.sin(i * 0.9 - now * freq * mo + T.ph) * amp * (i / TEND_M) * mo
-      g.lineTo(p[i * 2] - ty / tl * w, p[i * 2 + 1] + tx / tl * w)
-    }
-    g.stroke()
-  }
-  g.restore()
-}
+// (tendrilStep and drawTendrils live in life.js, with the sleep dance and the reach for the pointer.)
 
 function swimStep(A, now, sdt) {
   const mo = motion()
@@ -447,12 +380,31 @@ function snakeSpine(L, st, now) {
   const C = L.flt || L.chain, M = L.M, N = M - 1
   const rx = C[M * 2 - 2], ry = C[M * 2 - 1]
   const wig = 3.2 * motion()
+  // withdrawing, a limb is not scaled down: it keeps its length and reels in from the tip (see below)
+  const reel = (L.curl || 0) * Math.min(1, motion() * 2), st0 = st
+  st = st + (1 - st) * reel
   const tf = L.tipFrom || 0, tk = Math.min(1, st * 2.5)
   const bxs = rx + (C[tf * 2] - rx) * st, bys = ry + (C[tf * 2 + 1] - ry) * st
   for (let i = 0; i <= N; i++) {
     const k = M - 1 - i
     if (k >= tf) { SP[i * 2] = rx + (C[k * 2] - rx) * st; SP[i * 2 + 1] = ry + (C[k * 2 + 1] - ry) * st }
     else { SP[i * 2] = bxs + (C[k * 2] - C[tf * 2]) * tk; SP[i * 2 + 1] = bys + (C[k * 2 + 1] - C[tf * 2 + 1]) * tk }
+  }
+  // the reel: the tip lets go and curls back first, then a coil travels down the length toward the body (every
+  // joint past the coil's front turns further and draws closer than the one before, so the tip winds into a
+  // tightening spiral); last, the coil at the root is swallowed. Each limb turns its own way at its own tightness.
+  if (reel > 0.02 && st0 < 0.995) {
+    const rho = 1 - st0, sgn = L.seed % 2 ? 1 : -1, vary = 0.8 + 0.4 * ((L.seed % 7) / 6)
+    const icf = N * (1 - smooth(c01(rho * 1.3))), sw = smooth(c01((rho - 0.7) / 0.28))
+    let px = SP[0], py = SP[1], ox = px, oy = py
+    for (let i = 1; i <= N; i++) {
+      const dx = SP[i * 2] - px, dy = SP[i * 2 + 1] - py, w = (i - icf) * reel
+      px = SP[i * 2]; py = SP[i * 2 + 1]
+      if (w > 0) { const a = sgn * vary * (0.34 * w + 0.014 * w * w), k = 1 / (1 + 0.1 * w); ox += (dx * Math.cos(a) - dy * Math.sin(a)) * k; oy += (dx * Math.sin(a) + dy * Math.cos(a)) * k }
+      else { ox += dx; oy += dy }
+      SP[i * 2] = ox; SP[i * 2 + 1] = oy
+    }
+    if (sw > 0) for (let i = 1; i <= N; i++) { SP[i * 2] += (SP[0] - SP[i * 2]) * sw; SP[i * 2 + 1] += (SP[1] - SP[i * 2 + 1]) * sw }
   }
   for (let i = 0; i <= N; i++) {
     const a = Math.max(0, i - 1), b = Math.min(N, i + 1)
@@ -518,8 +470,8 @@ function cameraFollow(dt, now) {
       if (!view.framed) { view.framed = true; cam.x = cam.tx; cam.y = cam.ty; cam.z = cam.tz }
     }
   }
-  if (!isFinite(cam.tx) || !isFinite(cam.ty) || !isFinite(cam.tz)) { cam.tx = 0; cam.ty = 0; cam.tz = 1; view.framed = false }
-  if (!isFinite(cam.x) || !isFinite(cam.y) || !isFinite(cam.z)) { cam.x = cam.tx; cam.y = cam.ty; cam.z = cam.tz }
+  if (!isFinite(cam.tx) || !isFinite(cam.ty) || !isFinite(cam.tz) || cam.tz <= 0) { cam.tx = 0; cam.ty = 0; cam.tz = 1; view.framed = false }
+  if (!isFinite(cam.x) || !isFinite(cam.y) || !isFinite(cam.z) || cam.z <= 0) { cam.x = cam.tx; cam.y = cam.ty; cam.z = cam.tz }
   const rate = user ? 12 : 1.6
   cam.x = ease(cam.x, cam.tx, rate, dt); cam.y = ease(cam.y, cam.ty, rate, dt)
   cam.z = Math.exp(ease(Math.log(cam.z), Math.log(cam.tz), user ? 12 : 1.2, dt))
@@ -666,12 +618,15 @@ const rt = new Float64Array(8) // the spline of the connection being drawn: p0, 
 // the same way from the same region merge into a bigger highway (a second, coarser level) and split off near
 // their ends. Trunks are nudged out of tome cards. Recomputed only while the layout moves, cached otherwise.
 const bundles = new Map(), highways = new Map(), merged = new Map(), sides = new Map()
-let bundleAt = -1e9
+let bundleAt = -1e9, bundleCost = 0
+const coldBy = []
+for (let i = 0; i < 24; i++) coldBy.push([])
 const ra = [0, 0, 0, 0], rb = [0, 0, 0, 0]
 // the visible thing a tome's bindings attach to: its card, or its folder's pile while it is folded
 function endRect(V, out) {
   const P = V.pileOf ? vis.piles.get(V.pileOf) : null
-  if (P && P.n >= 2) { out[0] = P.x; out[1] = P.y - 6; out[2] = 70; out[3] = 30; return 'pile:' + V.pileOf }
+  // (a tome fanned out of an opened pile ends its connections on itself)
+  if (P && P.n >= 2 && !(V.pile < 0.5)) { out[0] = P.x; out[1] = P.y - 6; out[2] = 70; out[3] = 30; out[5] = 0; return 'pile:' + V.pileOf }
   drawnRect(V, out); return V.id
 }
 // the frame of a card as this frame draws it: shaken by an edit, scaled about its centre by depth and hub size
@@ -683,6 +638,7 @@ function drawnRect(V, out) {
   const dk = pack.init ? clamp(1 + (y + h / 2 - pack.cy) / depthSpan * 0.2, 0.78, 1.14) : 1
   const sc = V.scale * dk * (V.hub ? HUB_SCALE : 1)
   out[0] = x + w / 2 - w * sc / 2; out[1] = y + h / 2 - h * sc / 2; out[2] = w * sc; out[3] = h * sc
+  out[4] = sc; out[5] = V.blobK ? 1 : 0; out[6] = V.bseed || 0 // for the blobby rim (see blobEnd)
 }
 let endNow = 0
 // the attachment point on a side: the o-th of k along it, spread from the middle
@@ -693,6 +649,7 @@ function endPoint(r, side, o, k) {
   else if (side === 2) { ptmp[0] = r[0]; ptmp[1] = r[1] + r[3] / 2 + off }
   else if (side === 1) { ptmp[0] = r[0] + r[2] / 2 + off; ptmp[1] = r[1] + r[3] }
   else { ptmp[0] = r[0] + r[2] / 2 + off; ptmp[1] = r[1] }
+  blobEnd(r, side)
 }
 // every frame: the ends follow the frames as drawn right now (the sides and their order come from the last rebundle)
 function placeEnds() {
@@ -705,12 +662,13 @@ function placeEnds() {
 }
 function cellOfR(N, r, size) { return (N.pileOf ? 'ward:' + N.folder : (N.group || ('ward:' + N.folder))) + '|' + Math.round((r[0] + r[2] / 2) / size) + ',' + Math.round((r[1] + r[3] / 2) / size) }
 function coarseR(r, size) { return Math.round((r[0] + r[2] / 2) / size) + ',' + Math.round((r[1] + r[3] / 2) / size) }
+const clearList = [] // the drawn cards a trunk must stay out of, gathered once per rebundle
 function clearOfTomes(x, y) {
   // push a trunk point out of any card it falls on (with a margin), along the shortest way out
   for (let it = 0; it < 3; it++) {
     let moved = false
-    for (const N of vis.nodes.values()) {
-      if (!N.present || N.alpha < 0.3 || N.pileOf || !isFinite(N.x) || !isFinite(N.y)) continue
+    for (let ci = 0; ci < clearList.length; ci++) {
+      const N = clearList[ci]
       const m = 18
       if (x < N.x - m || x > N.x + N.w + m || y < N.y - m || y > N.y + N.h + m) continue
       const dl = x - (N.x - m), dr = (N.x + N.w + m) - x, du = y - (N.y - m), dd = (N.y + N.h + m) - y
@@ -731,6 +689,8 @@ function sideFor(r, ox, oy) {
 const SIDE_NX = [1, 0, -1, 0], SIDE_NY = [0, 1, 0, -1]
 function rebundle() {
   bundles.clear(); highways.clear(); sides.clear()
+  clearList.length = 0
+  for (const N of vis.nodes.values()) if (N.present && N.alpha >= 0.3 && !N.pileOf && isFinite(N.x) && isFinite(N.y)) clearList.push(N)
   for (const Mg of merged.values()) { Mg.n = 0; Mg.list.length = 0 }
   for (const E of vis.edges.values()) {
     if (E.alpha < 0.02) continue
@@ -917,32 +877,37 @@ function edgeInView(Mg) {
   return inView(x0, y0, Math.max(Mg.ra[0] + Mg.ra[2], Mg.rb[0] + Mg.rb[2]) - x0, Math.max(Mg.ra[1] + Mg.ra[3], Mg.rb[1] + Mg.rb[3]) - y0)
 }
 
-const DASH_PEND = [4, 6], DASH_GONE = [4, 4], dashDraw = [0, 0], ptmp = [0, 0], cold = []
+const DASH_PEND = [4, 6], DASH_GONE = [4, 4], dashDraw = [0, 0], ptmp = [0, 0]
 let frameDt = 1 / 60
 function drawEdges(now) {
   endNow = now
-  if (layout.awake > 0 || now - bundleAt > 400 || !merged.size) { rebundle(); bundleAt = now }
-  else placeEnds()
+  // the bundles are rebuilt at most every 100 ms while the map moves (every 400 ms at rest); between rebuilds the
+  // ends still follow the frames every frame
+  // (and never more often than ten times what a rebuild costs, so on a very large map it cannot eat the frame)
+  if ((layout.awake > 0 && now - bundleAt > Math.max(100, bundleCost * 10)) || now - bundleAt > Math.max(400, bundleCost * 10) || !merged.size) {
+    const t0 = performance.now(); rebundle(); bundleCost = performance.now() - t0; bundleAt = now
+  } else placeEnds()
   const z = view.cam.z, q = Q(), mo = motion()
   const base = Math.max(1.2, 1.1 / z)
   g.lineCap = 'round'; g.lineJoin = 'round'
   // cold connections in batches (same folder or cross, by thickness)
+  // (each connection is sorted into its batch in one sweep; the batches are then stroked one path each)
+  for (let pass = 0; pass < 24; pass++) coldBy[pass].length = 0
+  for (const Mg of merged.values()) {
+    if (Mg.alpha < 0.02 || Mg.pend > 0.02 || Mg.dying > 0.02 || Mg.glow > 0.03 || Mg.prog < 0.995 || Mg.fresh || Mg === view.hoverEdge) continue
+    if (!edgeInView(Mg) || degenerate(Mg)) continue
+    coldBy[((Mg.fade > 0.8 ? 0 : Mg.fade > 0.45 ? 1 : 2) << 3) | (Mg.cross ? 4 : 0) | Math.min(3, Mg.n - 1)].push(Mg)
+  }
   for (let pass = 0; pass < 24; pass++) {
-    g.beginPath()
-    cold.length = 0
+    const list = coldBy[pass]
+    if (!list.length) continue
     const cross = (pass & 4) !== 0, wb = pass & 3, fb = pass >> 3
-    for (const Mg of merged.values()) {
-      if (Mg.alpha < 0.02 || Mg.pend > 0.02 || Mg.dying > 0.02 || Mg.glow > 0.03 || Mg.prog < 0.995 || Mg.fresh || Mg === view.hoverEdge) continue
-      if (cross !== Mg.cross || Math.min(3, Mg.n - 1) !== wb) continue
-      if ((Mg.fade > 0.8 ? 0 : Mg.fade > 0.45 ? 1 : 2) !== fb) continue
-      if (!edgeInView(Mg) || degenerate(Mg)) continue
-      routeEdge(Mg); tracePath(); cold.push(Mg)
-    }
-    if (cold.length) {
-      // the batch is as faded as its ends (three levels), and thinner when faded
-      g.strokeStyle = rgba(fadeInk(fb, cross), FADE_LV[fb]); g.lineWidth = base * (cross ? 1.25 : 1) * widthOf({ n: wb + 1 }) * (0.6 + 0.4 * FADE_LV[fb]); g.stroke()
-      for (const Mg of cold) { routeEdge(Mg); arrows(Mg, fadeInk(fb, cross), 0.9 * FADE_LV[fb]) }
-    }
+    g.beginPath()
+    for (let i = 0; i < list.length; i++) { routeEdge(list[i]); tracePath() }
+    // the batch is as faded as its ends (three levels), and thinner when faded
+    g.strokeStyle = rgba(fadeInk(fb, cross), FADE_LV[fb]); g.lineWidth = base * (cross ? 1.25 : 1) * widthOf({ n: wb + 1 }) * (0.6 + 0.4 * FADE_LV[fb]); g.stroke()
+    // (arrowheads only where they are large enough on the screen to be seen)
+    if (z > 0.3) for (let i = 0; i < list.length; i++) { routeEdge(list[i]); arrows(list[i], fadeInk(fb, cross), 0.9 * FADE_LV[fb]) }
   }
   for (const Mg of merged.values()) {
     if (Mg.alpha < 0.02) continue
@@ -1064,13 +1029,15 @@ function renderCard(V, bucket) {
   c.width = Math.ceil((w + m * 2) * s); c.height = Math.ceil((h + m * 2) * s)
   const gg = c.getContext('2d')
   gg.scale(s, s); gg.translate(m, m)
-  gg.fillStyle = 'rgba(0,0,0,0.4)'; gg.fillRect(4, 5, w, h)
+  gg.fillStyle = 'rgba(0,0,0,0.36)'; gg.beginPath(); gg.roundRect(3, 5, w, h, CARD_RR + 1); gg.fill()
   const leather = LEATHER[V.kind] || LEATHER.class
-  gg.beginPath(); gg.roundRect(0, 0, w, h, 3); gg.fillStyle = leather; gg.fill()
-  gg.fillStyle = PAGE; gg.fillRect(10, HEAD_H - 2, w - 14, h - HEAD_H - 2)
+  // a soft, round-cornered card (the live blobby rim is drawn round it by drawTomes)
+  gg.beginPath(); gg.roundRect(0, 0, w, h, CARD_RR); gg.fillStyle = leather; gg.fill()
+  gg.save(); gg.clip()
+  if (h - HEAD_H - 2 > 0) { gg.fillStyle = PAGE; gg.beginPath(); gg.roundRect(10, HEAD_H - 2, w - 14, h - HEAD_H - 2, [2, 2, 6, 2]); gg.fill() }
   gg.fillStyle = '#5A4A26'; gg.fillRect(0, 0, 6, h)
-  gg.strokeStyle = BRASS; gg.lineWidth = 1.2; gg.beginPath(); gg.roundRect(0, 0, w, h, 3); gg.stroke()
-  gg.fillStyle = BRASS; gg.fillRect(w - 5, 0, 5, 5); gg.fillRect(w - 5, h - 5, 5, 5)
+  gg.restore()
+  gg.strokeStyle = BRASS; gg.lineWidth = 1.2; gg.beginPath(); gg.roundRect(0, 0, w, h, CARD_RR); gg.stroke()
   if (V.kind === 'interface' && h - HEAD_H > 40) {
     gg.strokeStyle = 'rgba(220,210,176,0.07)'; gg.lineWidth = 1
     gg.stroke(new Path2D(pentaPath(10 + (w - 14) / 2, HEAD_H - 2 + (h - HEAD_H - 2) / 2, Math.min(w - 14, h - HEAD_H) * 0.42, 0)))
@@ -1098,13 +1065,27 @@ function renderCard(V, bucket) {
   return { canvas: c, w, h, m, key: V.key, bucket, ts }
 }
 
+const CARD_CAP = 2400, CARD_BUDGET = 8
+let cardFrame = 0, cardRenders = 0
 function cardFor(V, bucket) {
   let c = cardCache.get(V.id)
   // the bitmap must have been rendered at exactly this card size and title scale: it is never stretched to fit
-  if (!c || c.key !== V.key || c.bucket !== bucket || c.w !== V.tw || c.h !== V.th || c.ts !== (V.titleScale || 1)) {
-    if (cardCache.size > 900) cardCache.clear()
+  const stale = !c || c.key !== V.key || c.w !== V.tw || c.h !== V.th || c.ts !== (V.titleScale || 1)
+  // a changed card renders at once; a change of zoom bucket alone is spread over frames (CARD_BUDGET a frame),
+  // the old bitmap drawn scaled meanwhile
+  // (a changed card may take three times the budget; beyond that it waits a frame: its old bitmap is drawn
+  // meanwhile, or a plain slab when it has none yet, so a map arriving all at once never renders in one frame)
+  if ((stale || c.bucket !== bucket) && cardRenders >= (stale ? CARD_BUDGET * 3 : CARD_BUDGET)) { if (!c) return null }
+  else if (stale || c.bucket !== bucket) {
+    cardRenders++
     c = renderCard(V, bucket); cardCache.set(V.id, c)
+    // least recently drawn go first when the cache is full
+    if (cardCache.size > CARD_CAP) {
+      const old = Array.from(cardCache.entries()).sort((p, q) => (p[1].used || 0) - (q[1].used || 0))
+      for (let i = 0; i < old.length >> 2; i++) cardCache.delete(old[i][0])
+    }
   }
+  c.used = cardFrame
   return c
 }
 
@@ -1293,12 +1274,14 @@ function syncSouls(S, T, now, dt) {
     // the orbit sits in the free space between the throat and the inner card ring
     const inner = W && W.n && W.r1 ? W.r1 - W.d1 / 2 - 36 : pack.coreR * 0.34
     so.r = owner ? clamp(inner, pack.coreR * 0.2, pack.coreR * 0.34) : 70; so.owner = owner
+    // (the ring is drawn projected onto the well, so it is not where its centre says: every soul checks for itself)
+    so.near = cur.on
     let alive = 0
     for (const s of so.list) if (s.state !== 'eaten' && s.state !== 'carried') alive++
     // every budget rise is a visible feeding: at least one soul, more for big jumps (log scale, at most six);
     // the ring then drifts back toward the true count
     if (a.feeds && a.feeds.length) {
-      if (so.feedT === undefined || so.feedT > T) so.feedT = T - 4500 // (a rewind starts afresh from here)
+      if (so.feedT === undefined || so.feedT > T) so.feedT = T - 4500 // (a refold starts afresh from here)
       for (const f of a.feeds) {
         if (f.t <= so.feedT || f.t > T) continue
         so.feedT = f.t
@@ -1338,6 +1321,8 @@ function syncSouls(S, T, now, dt) {
       let r = rr
       if (s.state === 'arriving') { const u = c01((now - s.t0) / 2500); r = s.r0 + (rr - s.r0) * smooth(u); if (u >= 1) s.state = 'ring' }
       if (s.state === 'carried') {
+        // a carried soul cannot flee the pointer; it only wriggles harder
+        s.fear = ease(s.fear || 0, so.near && mo > 0.02 && Math.hypot(s.x - cur.x, s.y - cur.y) < 90 ? 1 : 0, 8, dt)
         const L = vis.limbs.get(s.lid)
         if (!L || !A.present) { s.state = 'eaten'; s.t0 = now; s.fx = s.x; s.fy = s.y; A.feedT = now; if (L) L.extT = 0; continue }
         L.seen = true; L.node = ''; L.mode = 0; L.activeT = 1; L.waitT = 0; L.closedT = 0; L.extT = 1
@@ -1374,6 +1359,7 @@ function syncSouls(S, T, now, dt) {
       if (so.owner) { projectPolar(s.ang, r, prj); s.x = prj[0]; s.y = prj[1] }
       else { s.x = so.cx + Math.cos(s.ang) * r; s.y = so.cy + Math.sin(s.ang) * r * tilt.cos }
       s.sc = 1
+      soulFlee(s, dt, mo, so.near)
     }
   }
   for (const [k, so] of vis.souls) { if (!so.seen) vis.souls.delete(k); else so.seen = false }

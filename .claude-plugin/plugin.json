@@ -3,6 +3,37 @@
   "displayName": "Abyssal Eye",
   "author": { "name": "Abyssal Eye contributors" },
   "license": "MIT",
-  "version": "0.8.3",
-  "description": "A living Lovecraftian map of your codebase: watch Claude's tentacles write and eye stalks read, see new bindings form, and rewind history."
+  "homepage": "https://github.com/WeWatchFromTheAbyss/Abyssal-Eye",
+  "repository": "https://github.com/WeWatchFromTheAbyss/Abyssal-Eye",
+  "privacyPolicyUrl": "https://github.com/WeWatchFromTheAbyss/Abyssal-Eye#privacy",
+  "version": "0.9.3",
+  "description": "A living Lovecraftian map of your codebase: watch Claude's tentacles write and eye stalks read, and see new bindings form.",
+  "userConfig": {
+    "updateCheck": {
+      "type": "boolean",
+      "title": "Update check",
+      "description": "At session start, fetch the published manifest from raw.githubusercontent.com to see whether a newer version exists. Nothing updates without a click.",
+      "default": true
+    },
+    "history": {
+      "type": "boolean",
+      "title": "Earlier sessions on the map",
+      "description": "Seed the map from earlier sessions of the project (up to 25 transcripts from the last 14 days).",
+      "default": false
+    },
+    "quality": {
+      "type": "string",
+      "title": "Default quality",
+      "description": "The view's quality for a viewer who has not chosen one with the Q key.",
+      "default": "medium",
+      "options": ["low", "medium", "high"]
+    },
+    "motion": {
+      "type": "string",
+      "title": "Default motion",
+      "description": "The view's motion for a viewer who has not chosen one with the M key.",
+      "default": "full",
+      "options": ["off", "calm", "full"]
+    }
+  }
 }

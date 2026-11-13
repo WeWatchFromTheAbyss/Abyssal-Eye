@@ -6,29 +6,101 @@
 <title>Abyssal Eye</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1C2321; }
-  canvas { display: block; width: 100vw; height: 100vh; cursor: default; }
-  #ext {
-    position: fixed; right: 10px; bottom: 26px; z-index: 3; display: none; cursor: pointer; user-select: none;
-    width: 26px; height: 26px; line-height: 24px; text-align: center; border-radius: 4px;
+  canvas { display: block; width: 100vw; height: 100vh; cursor: default; touch-action: none; }
+  .ctl {
+    position: fixed; bottom: 26px; z-index: 3; cursor: pointer; user-select: none;
+    width: 26px; height: 26px; line-height: 24px; text-align: center; border-radius: 4px; box-sizing: border-box;
     font: 15px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #A8843A;
     background: rgba(20, 26, 24, .85); border: 1px solid rgba(168, 132, 58, .45);
   }
-  #ext:hover { color: #DCD2B0; border-color: rgba(168, 132, 58, .9); }
+  .ctl:hover { color: #DCD2B0; border-color: rgba(168, 132, 58, .9); }
+  #ext { right: 10px; display: none; }
+  #help { right: 10px; }
+  #ext[style*="block"] ~ #help { right: 42px; }
   #tip {
-    position: fixed; pointer-events: none; display: none; white-space: pre;
+    position: fixed; pointer-events: none; display: none; white-space: pre-wrap; overflow-wrap: anywhere;
     font: 11.5px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #DCD2B0;
     background: rgba(20, 26, 24, .92); border: 1px solid rgba(168, 132, 58, .45); border-radius: 3px;
-    padding: 5px 8px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; z-index: 2;
+    padding: 5px 8px; max-width: 360px; z-index: 2;
   }
+  #helpPanel {
+    position: fixed; inset: 0; z-index: 4; display: none; background: rgba(10, 14, 13, .72);
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #DCD2B0;
+  }
+  #helpPanel .box {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; box-sizing: border-box;
+    background: rgba(20, 26, 24, .97); border: 1px solid rgba(168, 132, 58, .55); border-radius: 6px; padding: 16px 20px 18px;
+  }
+  #helpPanel h2 { margin: 0 0 6px; font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #A8843A; }
+  #helpPanel .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 28px; }
+  @media (max-width: 620px) { #helpPanel .cols { grid-template-columns: 1fr; } }
+  #helpPanel dl { margin: 0 0 12px; display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; }
+  #helpPanel dt { color: #E9DFC0; white-space: nowrap; }
+  #helpPanel dd { margin: 0; color: #B5AA86; }
+  #helpClose { position: absolute; right: 12px; top: 8px; cursor: pointer; color: #A8843A; font-size: 16px; }
+  #helpClose:hover { color: #DCD2B0; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="tip"></div>
-<div id="ext" title="Open in browser">&#8599;</div>
+<div id="ext" class="ctl" title="Open in browser">&#8599;</div>
+<div id="help" class="ctl" title="Controls and legend (?)">?</div>
+<div id="helpPanel">
+  <div class="box">
+    <div id="helpClose" title="Close (Esc)">&#10005;</div>
+    <div class="cols">
+      <div>
+        <h2>Controls</h2>
+        <dl>
+          <dt>Wheel, pinch</dt><dd>zoom</dd>
+          <dt>Drag</dt><dd>pan</dd>
+          <dt>Right or Shift drag</dt><dd>tilt the view</dd>
+          <dt>Double-click, F</dt><dd>follow the work again (zooming or panning pauses it)</dd>
+          <dt>Drag a card</dt><dd>pin it where you drop it</dd>
+          <dt>Double-click a card</dt><dd>release its pin</dd>
+          <dt>Click a pile</dt><dd>fan out its first layer; click a card in it to open it; click the pile, empty space or Esc to fold it back</dd>
+          <dt>Move the pointer near</dt><dd>creatures notice your cursor: eyes follow it, souls flee it, tendrils reach for it</dd>
+
+          <dt>Q</dt><dd>quality: low, medium, high</dd>
+          <dt>M</dt><dd>motion: off, calm, full</dd>
+          <dt>H</dt><dd>earlier sessions on the map, on or off</dd>
+          <dt>?</dt><dd>this help; Esc closes it</dd>
+        </dl>
+      </div>
+      <div>
+        <h2>Legend</h2>
+        <dl>
+          <dt>Pyramid with an eye</dt><dd>a Claude session; small ones are subagents</dd>
+          <dt>Tentacle</dt><dd>an edit, reaching the method written</dd>
+          <dt>Eye stalk</dt><dd>reading or searching</dd>
+          <dt>Tome</dt><dd>a class or file, with its members</dd>
+          <dt>Ward</dt><dd>a folder: the dotted arc with a name</dd>
+          <dt>Pile</dt><dd>quiet tomes, gathered and labelled</dd>
+          <dt>Strand</dt><dd>a binding between two tomes; dashed while an edit awaits you</dd>
+          <dt>Souls</dt><dd>the context window still free</dd>
+          <dt>Skull</dt><dd>what is left of a soul that was eaten</dd>
+          <dt>Pentagram</dt><dd>the turn is done</dd>
+          <dt>Open mouth</dt><dd>Claude needs you: a permission or a question</dd>
+          <dt>TheyEye</dt><dd>an inspector: a reviewing subagent</dd>
+          <dt>Pyramid with a fringe</dt><dd>an agent running on Fable: face tentacles, extra eyes, a fleshy outline</dd>
+          <dt>Spiral eye</dt><dd>a subagent listening to its orders</dd>
+          <dt>Tube between two</dt><dd>the tether of a subagent; the beads are data passing</dd>
+          <dt>Skewered subagent</dt><dd>a correction: its parent had to redo or redirect its work</dd>
+          <dt>Slime</dt><dd>an agent hard at work</dd>
+          <dt>z z Z</dt><dd>asleep: idle for a while (its tendrils dance)</dd>
+          <dt>Crackle on a tome</dt><dd>edited in the last 15 seconds</dd>
+          <dt>Violet glow</dt><dd>your own edit</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
 <script src="core.js"></script>
 <script src="layout.js"></script>
 <script src="draw.js"></script>
+<script src="life.js"></script>
 <script src="main.js"></script>
 </body>
 </html>

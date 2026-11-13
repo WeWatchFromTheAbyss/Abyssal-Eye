@@ -1,4 +1,4 @@
-// Abyssal Eye live view, part 2 of 4: tomes, edges, clustering, piles, wards, radial layout, limbs and actors.
+// Abyssal Eye live view, part 2 of 5: tomes, edges, clustering, piles, wards, radial layout, limbs and actors.
 'use strict'
 function syncEdges(S, T) {
   for (const E of vis.edges.values()) E.seen = false
@@ -85,8 +85,9 @@ function syncNodes(S, T) {
     // tainted: no fading, folding or piling while the taint lasts
     V.tDim = hov || V.taint > 0 ? 1 : 1 - 0.75 * smooth((idle - 600000) / 1200000)
     // a crowded map folds and piles its quiet tomes sooner: with hundreds of tomes present, a few idle minutes suffice
-    const foldK = clamp(40 / Math.max(1, vis.presentN || 0), 0.1, 1)
-    V.tFold = idle > 600000 * foldK && !V.taint ? 1 : 0
+    // (down to 3%: a map of a thousand tomes folds after some 20 idle seconds and piles after 30)
+    const foldK = clamp(40 / Math.max(1, vis.presentN || 0), 0.03, 1)
+    V.tFold = idle > 600000 * foldK && !V.taint && !fan.kept.has(V.id) ? 1 : 0
     V.tPile = !gone && idle > 900000 * foldK && !V.taint ? 1 : 0
     if (V.pin) { V.tPile = 0 }
     if (V.tPile) V.alive = false
@@ -371,14 +372,22 @@ function drawPiles() {
     g.fillStyle = BONE; g.font = '600 ' + (P.n > 99 ? 8 : 9) + 'px ' + FONT; g.textAlign = 'center'; g.textBaseline = 'middle'
     g.fillText(String(P.n), P.x + 50, P.y + 12.5)
     const Wd = vis.wards.get(P.folder)
+    // the pile's own lines step down below a ward label that would lie across them
+    let want = 0
+    for (const W of vis.wards.values()) {
+      if (W.alpha < 0.3 || W.labW === undefined) continue
+      if (P.x - 14 < W.labX + W.labW && P.x + 78 > W.labX && P.y + 24 < W.labY + W.labH && P.y + 48 > W.labY) want = Math.max(want, Math.min(34, W.labY + W.labH + 4 - (P.y + 24)))
+    }
+    P.labOff = ease(P.labOff || 0, want, 6, 1 / 60)
+    const lo = P.labOff
     if (P.label) {
       g.fillStyle = rgba(BONE, 0.92); g.font = '600 10.5px ' + FONT
-      g.fillText(clipMid(P.label, 22), P.x + 32, P.y + 33)
+      g.fillText(clipMid(P.label, 22), P.x + 32, P.y + 33 + lo)
     }
     if (!Wd || Wd.alpha < 0.5 || Wd.labW === undefined || P.label) {
       g.fillStyle = rgba(ASH, 0.75); g.font = '9px ' + FONT
       const ward = clipMid(Wd && Wd.short ? Wd.short : P.folder.split('/').pop(), 16) + ((P.mixed || 1) > 1 ? ' +' + (P.mixed - 1) : '')
-      g.fillText(ward + ' \u00b7 ' + P.n + ' tomes', P.x + 32, P.y + (P.label ? 44 : 34))
+      g.fillText(ward + ' \u00b7 ' + P.n + ' tomes', P.x + 32, P.y + (P.label ? 44 : 34) + lo)
     }
     g.textAlign = 'left'
     const pz = P.zapT && motion() > 0.02 ? clamp(1 - (performance.now() - P.zapT) / 1400, 0, 1) : 0
@@ -474,64 +483,101 @@ function massOf(V, deg) {
   const recent = (V.idleMs !== undefined && V.idleMs < 600000) ? 1 : 0
   return Math.log2(1 + deg) + 0.5 * Math.log2(1 + lines / 50) + 0.3 * Math.log2(1 + mem) + recent
 }
+// Called every frame; the work is done only when the set of tomes or of bindings has changed (told from two
+// numbers summed over them, no strings built), and then at most every 1.5 s. It runs on indices and flat arrays:
+// a map of a thousand tomes is clustered in a few milliseconds, where the keyed version cost a quarter second.
+const clScore = { n: 0, s: null, mass: null, deg: null, of: null, size: null }
 function clusterStep() {
-  const ids = [], byId = new Map()
-  let sig = ''
-  for (const V of vis.nodes.values()) if (V.present) { ids.push(V.id); byId.set(V.id, V); sig += V.id + ';' }
+  // the signature: how many, and an order-free sum over ids
+  let nN = 0, hN = 0, nE = 0, hE = 0
+  for (const V of vis.nodes.values()) if (V.present) { nN++; hN = (hN + V.seed) | 0 }
+  for (const E of vis.edges.values()) {
+    if (!E.a.present || !E.b.present || E.tAlpha === 0 || E.a === E.b) continue
+    nE++; hE = (hE + Math.imul(E.a.seed ^ 0x5bd1e995, 31) + Math.imul(E.b.seed ^ 0x5bd1e995, 31)) | 0
+  }
+  const sig = nN + ':' + hN + ':' + nE + ':' + hE
+  if (sig === clusters.sig) return
+  const nowC = performance.now()
+  if (clusters.at && nowC - clusters.at < 1500 && clusters.sig) return // (a burst of arrivals is clustered once)
+  clusters.sig = sig; clusters.at = nowC
+  const ids = []
+  const byId = new Map()
+  for (const V of vis.nodes.values()) if (V.present) { ids.push(V.id); byId.set(V.id, V) }
+  ids.sort()
+  const n = ids.length, idx = new Map()
+  for (let i = 0; i < n; i++) idx.set(ids[i], i)
+  // the graph: neighbours with weights, each pair once
   const pairs = new Map()
   for (const E of vis.edges.values()) {
     if (!E.a.present || !E.b.present || E.tAlpha === 0 || E.a === E.b) continue
-    const k = E.a.id < E.b.id ? E.a.id + '\x01' + E.b.id : E.b.id + '\x01' + E.a.id
+    const a = idx.get(E.a.id), b = idx.get(E.b.id)
+    if (a === undefined || b === undefined) continue
+    const k = a < b ? a * n + b : b * n + a
     pairs.set(k, (pairs.get(k) || 0) + 1)
   }
-  const keys = Array.from(pairs.keys()).sort()
-  sig += '|' + keys.join(',')
-  if (sig === clusters.sig) return
-  clusters.sig = sig
-  ids.sort()
-  // the graph: neighbours with weights normalised by degree, so a tome bound to everything swallows nothing
-  const adj = new Map()
-  for (const id of ids) adj.set(id, new Map())
-  for (const k of keys) { const cut = k.indexOf('\x01'), a = k.slice(0, cut), b = k.slice(cut + 1); if (!adj.has(a) || !adj.has(b)) continue; const w = pairs.get(k); adj.get(a).set(b, w); adj.get(b).set(a, w) }
-  const deg = new Map(); for (const id of ids) deg.set(id, adj.get(id).size)
-  const nw = (a, b) => { const w = adj.get(a).get(b) || 0; return w ? w / Math.sqrt(Math.max(1, deg.get(a)) * Math.max(1, deg.get(b))) : 0 }
-  const mass = new Map(); for (const id of ids) mass.set(id, massOf(byId.get(id), deg.get(id)))
+  const adj = new Array(n), adw = new Array(n)
+  for (let i = 0; i < n; i++) { adj[i] = []; adw[i] = [] }
+  for (const [k, w] of pairs) { const a = Math.floor(k / n), b = k - a * n; adj[a].push(b); adw[a].push(w); adj[b].push(a); adw[b].push(w) }
+  if (clScore.n < n) { clScore.n = n + 64; clScore.s = new Float64Array(clScore.n); clScore.mass = new Float64Array(clScore.n); clScore.deg = new Int32Array(clScore.n); clScore.of = new Int32Array(clScore.n); clScore.size = new Int32Array(clScore.n) }
+  const score = clScore.s, mass = clScore.mass, deg = clScore.deg, of = clScore.of, size = clScore.size
+  for (let i = 0; i < n; i++) { deg[i] = adj[i].length; mass[i] = massOf(byId.get(ids[i]), deg[i]); of[i] = i; size[i] = 1; score[i] = 0 }
+  // weights normalised by degree (worked out once per binding), so a tome bound to everything swallows nothing
+  for (let a = 0; a < n; a++) { const ws = adw[a], ns = adj[a]; for (let k = 0; k < ws.length; k++) ws[k] = ws[k] / Math.sqrt(Math.max(1, deg[a]) * Math.max(1, deg[ns[k]])) }
+  const nw = (a, k) => adw[a][k]
   // utility-like tomes: a degree above the 95th percentile (and more than 8) attract nobody
-  const degs = ids.map(id => deg.get(id)).sort((a, b) => a - b)
-  const p95 = degs.length ? degs[Math.floor((degs.length - 1) * 0.95)] : 0
-  const utility = new Set(); for (const id of ids) if (deg.get(id) > 8 && deg.get(id) > p95) utility.add(id)
+  const degs = Array.from(deg.subarray(0, n)).sort((a, b) => a - b)
+  const p95 = n ? degs[Math.floor((n - 1) * 0.95)] : 0
+  const utility = new Uint8Array(n)
+  for (let i = 0; i < n; i++) if (deg[i] > 8 && deg[i] > p95) utility[i] = 1
   // every lighter tome joins the hub it hangs from most strongly (one or two hops), the lightest first; a hub
   // joins a heavier hub only when very strongly bound; clusters are capped; the weakly attached stay alone
-  const order = ids.slice().sort((a, b) => (mass.get(a) - mass.get(b)) || (a < b ? -1 : 1))
-  const of = new Map(), size = new Map()
-  for (const id of ids) { of.set(id, id); size.set(id, 1) }
-  const root = id => { let r = id; let guard = 0; while (of.get(r) !== r && guard++ < 64) r = of.get(r); return r }
-  const CAP = 14
-  for (const b of order) {
-    if (utility.has(b)) continue
-    const mb = mass.get(b)
+  const order = new Array(n)
+  for (let i = 0; i < n; i++) order[i] = i
+  order.sort((a, b) => (mass[a] - mass[b]) || (a - b))
+  const root = i => { let r = i, guard = 0; while (of[r] !== r && guard++ < 64) r = of[r]; return r }
+  const CAP = 14, touched = [], direct = new Float64Array(n)
+  for (let oi = 0; oi < n; oi++) {
+    const b = order[oi]
+    if (utility[b]) continue
+    const mb = mass[b]
     // equal masses are ordered by id, so a ring of alike tomes still gathers round one of them
-    const heavier = h => mass.get(h) > mb || (mass.get(h) === mb && h < b)
-    const cand = new Map()
-    for (const [h, w] of adj.get(b)) { if (utility.has(h) || !heavier(h)) continue; cand.set(h, Math.max(cand.get(h) || 0, nw(b, h) * mass.get(h))) }
-    for (const [c] of adj.get(b)) for (const [h] of adj.get(c)) { if (h === b || utility.has(h) || !heavier(h)) continue; const s = nw(b, c) * nw(c, h) * mass.get(h) / 2; if (s > (cand.get(h) || 0)) cand.set(h, s) }
-    const list = Array.from(cand.entries()).sort((p, q) => (q[1] - p[1]) || (p[0] < q[0] ? -1 : 1))
+    touched.length = 0
+    const nb = adj[b]
+    for (let k = 0; k < nb.length; k++) {
+      const h = nb[k], w1 = nw(b, k)
+      direct[h] = w1
+      if (!utility[h] && (mass[h] > mb || (mass[h] === mb && h < b))) { const s = w1 * mass[h]; if (s > score[h]) { if (score[h] === 0) touched.push(h); score[h] = s } }
+    }
+    for (let k = 0; k < nb.length; k++) {
+      const c = nb[k], w1 = nw(b, k), nc = adj[c]
+      if (nc.length > 48) continue // (nothing is reached through a tome bound to half the map: it would cost a pass over all of it)
+      for (let m = 0; m < nc.length; m++) {
+        const h = nc[m]
+        if (h === b || utility[h] || !(mass[h] > mb || (mass[h] === mb && h < b))) continue
+        const s = w1 * nw(c, m) * mass[h] / 2
+        if (s > score[h]) { if (score[h] === 0) touched.push(h); score[h] = s }
+      }
+    }
+    touched.sort((p, q) => (score[q] - score[p]) || (p - q))
     // hysteresis: the hub it had last time keeps it unless another scores 20% better
-    const prev = clusters.prev.get(b)
-    if (prev && cand.has(prev.hub) && list.length && list[0][0] !== prev.hub && list[0][1] < cand.get(prev.hub) * 1.2) { list.unshift([prev.hub, cand.get(prev.hub)]) }
-    for (const [h, s] of list) {
+    const prev = clusters.prev.get(ids[b]), ph = prev ? idx.get(prev.hub) : undefined
+    if (ph !== undefined && score[ph] > 0 && touched.length && touched[0] !== ph && score[touched[0]] < score[ph] * 1.2) touched.unshift(ph)
+    for (let k = 0; k < touched.length; k++) {
+      const h = touched[k], s = score[h]
       if (s < 0.15) break
-      if (mb >= 0.7 * mass.get(h) && nw(b, h) < 0.5) continue // two hubs: only a very strong bond joins them
+      if (mb >= 0.7 * mass[h] && (direct[h] || 0) < 0.5) continue // two hubs: only a very strong bond joins them
       const r = root(h)
-      if (r === b || size.get(r) + size.get(b) > CAP) continue
-      of.set(b, r); size.set(r, size.get(r) + size.get(b))
-      clusters.prev.set(b, { hub: h, score: s })
+      if (r === b || size[r] + size[b] > CAP) continue
+      of[b] = r; size[r] += size[b]
+      clusters.prev.set(ids[b], { hub: ids[h], score: s })
       break
     }
+    for (let k = 0; k < touched.length; k++) score[touched[k]] = 0
+    for (let k = 0; k < nb.length; k++) direct[nb[k]] = 0
   }
   clusters.of.clear(); clusters.hubs.clear()
   const count = new Map()
-  for (const id of ids) { const r = root(id); clusters.of.set(id, r); count.set(r, (count.get(r) || 0) + 1) }
+  for (let i = 0; i < n; i++) { const r = ids[root(i)]; clusters.of.set(ids[i], r); count.set(r, (count.get(r) || 0) + 1) }
   for (const [r, c] of count) if (c > 1) clusters.hubs.add(r)
   clusters.sizes = Array.from(count.values()).sort((a, b) => b - a)
   for (const V of vis.nodes.values()) V.hub = clusters.hubs.has(V.id)
@@ -1186,13 +1232,17 @@ function layoutStep(dt) {
 function animate(dt, now) {
   const r6 = 6, r10 = 10
   for (const V of vis.nodes.values()) {
-    if (V.pileOf) { const P = vis.piles.get(V.pileOf); if (P) { V.lx = ease(V.lx, P.x, 2, dt); V.ly = ease(V.ly, P.y, 2, dt) } }
-    V.dim = ease(V.dim === undefined ? 1 : V.dim, V.tDim === undefined ? 1 : V.tDim, 1.5, dt); V.pile = ease(V.pile || 0, V.tPile || 0, 2, dt)
+    // a member of an opened pile sits in its slot of the fan (staggered, eased out with a slight overshoot) and
+    // shows; closing, it eases back into the stack like any piled tome
+    const fs = V.pileOf ? fanSlot(V, now) : null
+    if (fs) { V.lx = fs.x; V.ly = fs.y; V.x = fs.x; V.y = fs.y }
+    else if (V.pileOf) { const P = vis.piles.get(V.pileOf); if (P) { V.lx = ease(V.lx, P.x, 2, dt); V.ly = ease(V.ly, P.y, 2, dt) } }
+    V.dim = ease(V.dim === undefined ? 1 : V.dim, fs || V.tDim === undefined ? 1 : V.tDim, fs ? 8 : 1.5, dt); V.pile = ease(V.pile || 0, fs ? (fs.u > 0 ? 0 : 1) : (V.tPile || 0), fs ? 12 : 2, dt)
     if (!isFinite(V.lx) || !isFinite(V.ly)) { V.lx = isFinite(V.homeX) ? V.homeX : 0; V.ly = isFinite(V.homeY) ? V.homeY : 0; V.vx = 0; V.vy = 0; V.homeX = V.lx; V.homeY = V.ly }
     if (!isFinite(V.x) || !isFinite(V.y)) { V.x = V.lx; V.y = V.ly }
     V.x = ease(V.x, V.lx, 5, dt); V.y = ease(V.y, V.ly, 5, dt)
     V.w = ease(V.w, V.tw, r6, dt); V.h = ease(V.h, V.th, r6, dt)
-    V.alpha = ease(V.alpha, V.present ? (V.alive ? 1 : 0.5) : 0, V.present ? 4 : 2.5, dt)
+    V.alpha = ease(V.alpha, V.present ? (V.alive || fs ? 1 : 0.5) : 0, V.present ? 4 : 2.5, dt)
     V.scale = ease(V.scale, V.present ? 1 : 0.8, 4.5, dt)
     V.hRead = ease(V.hRead, V.tRead, r6, dt); V.hEdit = ease(V.hEdit, V.tEdit, r6, dt); V.hExt = ease(V.hExt, V.tExt, r6, dt)
     V.hFresh = ease(V.hFresh, V.tFresh, r6, dt); V.hGhost = ease(V.hGhost, V.tGhost, 3, dt)
@@ -1221,34 +1271,28 @@ function animate(dt, now) {
     A.tone = A.parent ? THRALL : A.hue
     A.open = ease(A.open, A.mood === 'thinking' ? 0.3 : 1, 6, dt)
     A.aura = ease(A.aura, A.mood === 'idle' ? 0.5 : 1, 3, dt)
-    // the pupil follows the thrall it oversees, else the gaze point of its eye stalk (saccading over rows), else the limb target
-    let lx = 0, ly = 0, found = false, rate = 6, eyeKey = ''
-    for (const L of vis.limbs.values()) if (L.actor === id && L.extT > 0) {
-      const px = L.eye ? L.lx : L.gx, py = L.eye ? L.ly : L.gy
-      const dx = px - A.x, dy = py - A.y, d = Math.hypot(dx, dy) || 1; lx = dx / d; ly = dy / d; found = true
-      // reading: the pupil sweeps the line left to right with the stalk, snapping back at the line's end
-      if (L.eye && L.scanU !== undefined) { lx = lx * 0.55 + (L.scanU * 2 - 1) * 0.5; ly = ly * 0.55 + 0.12; rate = 30 }
-      if (L.eye) rate = 16
-      eyeKey = L.lookId || L.wanderNode || L.node || L.kind
-      break
-    }
-    const Th = !found && A.thrall ? vis.actors.get(A.thrall) : null
-    if (Th) { const dx = Th.x - A.x, dy = Th.y - A.y, d = Math.hypot(dx, dy) || 1; lx = dx / d; ly = dy / d; found = true; eyeKey = Th.id }
-    blinkStep(A, eyeKey, now, A.seed)
-    if (!found) { const dx = A.gx - A.x, dy = A.gy - A.y, d = Math.hypot(dx, dy); if (d > 30) { lx = dx / d * 0.5; ly = dy / d * 0.5 }; lx += Math.sin(now * 0.00037 + A.seed) * 0.18 * motion(); ly += Math.cos(now * 0.00029 + A.seed) * 0.08 * motion(); rate = 1.2 }
-    A.look[0] = ease(A.look[0], lx, rate, dt); A.look[1] = ease(A.look[1], ly, rate, dt)
+    // the gaze, and the eased states of hypnosis, sleep, the pointer, the wait, the breath (life.js)
+    lifeAnimate(A, id, now, dt)
     A.pulse = ease(A.pulse || 0, 0, 2.2, dt)
     A.done = ease(A.done || 0, A.doneT || 0, A.doneT ? 1.6 : 7, dt)
     // the gape: close the eye, withdraw it, open the mouth over about 0.8 s; back the same way when the wait ends
-    A.waitK = ease(A.waitK || 0, A.waitT || 0, 4.2, dt)
-    A.bodyK = 1 + 0.3 * smooth(A.waitK)
+    // (A.waitK and A.bodyK are stepped in lifeAnimate: one clock for the whole morph)
     A.knot = ease(A.knot || 0, A.knotT || 0, 1.4, dt)
   }
   for (const L of vis.limbs.values()) {
     const A = vis.actors.get(L.actor)
     if (!A) { L.extT = 0; L.ext = 0; continue }
-    L.ext = ease(L.ext, L.extT, L.extT ? 7 : 5, dt)
-    L.closed = ease(L.closed, L.closedT, 8, dt)
+    // (a withdrawal takes 0.6 to 0.9 s, each limb at its own pace; its eye blinks shut as it goes)
+    // reaching out eases; withdrawing runs on a linear clock of 0.6 to 0.9 s (each limb its own), smoothed at both
+    // ends, so the reel-in is spread over the whole withdrawal instead of spent in its first frames
+    if (L.extT) { L.ext = ease(L.ext, 1, 7, dt); L.rt = undefined }
+    else {
+      // (starting from wherever the limb had got to: the clock that gives this extension)
+      if (L.rt === undefined) L.rt = 0.5 - Math.sin(Math.asin(clamp(2 * L.ext - 1, -1, 1)) / 3)
+      L.rt = Math.min(1, L.rt + dt / (0.6 + 0.3 * ((L.seed % 5) / 4)))
+      L.ext = motion() > 0.02 ? 1 - smooth(L.rt) : ease(L.ext, 0, 5, dt)
+    }
+    L.closed = ease(L.closed, L.extT === 0 ? 1 : L.closedT, 8, dt)
     L.active = ease(L.active, L.activeT, 8, dt)
     L.wait = ease(L.wait, L.waitT, 8, dt)
     L.front = ease(L.front, L.frontT, 5, dt)
@@ -1261,6 +1305,11 @@ function animate(dt, now) {
     const reach = Math.hypot(L.gx - ROOT[0], L.gy - ROOT[1])
     L.scale = ease(L.scale, clamp(reach / 240, 0.45, 1), 4, dt)
     chainStep(L, A, now, dt)
+    if (L.eye || L.tipEye > 0.05) limbGaze(L, A, now, dt)
+    // withdrawing: the reel-in (see snakeSpine), and a small gulp as the body swallows the last of it
+    L.curl = ease(L.curl || 0, L.extT === 0 ? 1 : 0, 6, dt)
+    if (L.extT !== 0) L.gulped = false
+    else if (!L.gulped && L.ext < 0.07) { L.gulped = true; if (motion() > 0.02 && L.kind !== 'feed') { A.pulse = Math.max(A.pulse || 0, 0.4); A.pulseCol = A.tone } }
     // gulped blobs travel from the tip down to the root; arriving, they make the creature pulse once
     const mo = motion()
     for (let b = L.blobs.length - 1; b >= 0; b--) {
@@ -1271,11 +1320,11 @@ function animate(dt, now) {
   }
   for (const [k, P] of vis.props) {
     P.alpha = ease(P.alpha, P.want || 0, P.want ? 5 : 2, dt); P.active = ease(P.active, P.activeT || 0, 6, dt)
-    P.want = 0; P.activeT = 0
+    P.fade = !P.want; P.want = 0; P.activeT = 0
     if (P.alpha < 0.01 && !P.want) { vis.props.delete(k); continue }
     propStep(P, dt)
   }
-  view.handle = ease(view.handle, view.live ? 1 : view.hf, 14, dt)
+
 }
 
 // ---------- snake tentacles: a follow-the-leader chain whose head hugs the card it works on ----------

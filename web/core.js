@@ -1,5 +1,5 @@
-// Abyssal Eye live view, part 1 of 4: settings, event sources (server poll and demo), history fold, visual state.
-// The four parts are plain scripts loaded in order by index.html and share one scope: core, layout, draw, main.
+// Abyssal Eye live view, part 1 of 5: settings, event sources (server poll and demo), history fold, visual state.
+// The five parts are plain scripts loaded in order by index.html and share one scope: core, layout, draw, life, main.
 'use strict'
 
 // ---------- palette and constants ----------
@@ -30,9 +30,19 @@ const EMPTY_DASH = []
 // ---------- settings (keyboard only, persisted) ----------
 
 const QUAL = ['low', 'medium', 'high'], MOT = [0, 0.5, 1]
-let settings = { q: 1, m: 2 }
-try { const s = JSON.parse(localStorage.getItem('abyssal-eye.settings') || 'null'); if (s && s.q >= 0 && s.q <= 2 && s.m >= 0 && s.m <= 2) settings = s } catch (e) { /* no storage */ }
-function saveSettings() { try { localStorage.setItem('abyssal-eye.settings', JSON.stringify(settings)) } catch (e) { /* ignore */ } }
+// (a system that asks for reduced motion starts with motion off, unless a choice was saved)
+let settings = { q: 1, m: (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) ? 0 : 2 }
+let settingsSaved = false
+try { const s = JSON.parse(localStorage.getItem('abyssal-eye.settings') || 'null'); if (s && s.q >= 0 && s.q <= 2 && s.m >= 0 && s.m <= 2) { settings = s; settingsSaved = true } } catch (e) { /* no storage */ }
+// the plugin's own defaults (its settings in /config) come with the stream's hello, for a viewer who has chosen none
+function adoptDefaults(e) {
+  if (settingsSaved) return
+  const q = { low: 0, medium: 1, high: 2 }[e.quality], m = { off: 0, calm: 1, full: 2 }[e.motion]
+  const calm = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (q !== undefined && q !== settings.q) { settings.q = q; if (typeof resize === 'function') resize() }
+  if (m !== undefined && !calm) settings.m = m
+}
+function saveSettings() { settingsSaved = true; try { localStorage.setItem('abyssal-eye.settings', JSON.stringify(settings)) } catch (e) { /* ignore */ } }
 const Q = () => settings.q
 const motion = () => MOT[settings.m]
 
@@ -102,7 +112,8 @@ const PROPS = {
 
 const DEMO = /[?&]demo/.test(location.search)
 // dev aids, only with ?debug: skip=S (start the demo S seconds in), noloop (play the demo once), nopause (keep
-// animating in a hidden tab), stress=N (a large pre-existing demo map), and window.__scope (the live state)
+// animating in a hidden tab), stress=N (a large pre-existing demo map), force=hyp,slime,wait,sleep (hold that state
+// on every creature), and window.__abyss (the live state; __abyss.correct() skewers every subagent on the map)
 const DEBUG = /[?&]debug/.test(location.search)
 const src = { epoch: null, seq: 0, inflight: false, retryAt: 0 }
 // loading: until the stream held by the server has all arrived the scene stays off screen behind the waiting plate
@@ -228,7 +239,7 @@ function demoScript() {
   at(0.4, think(M1, true))
   at(1.6, think(M1, false))
   at(0.1, act('a9', M1, 'agent', 'Agent', null, null, 'Explore shaders'))
-  at(0.4, { type: 'actor', id: S1, label: 'Explorer', parent: M1, task: 'Survey the shader folder for dissolve effects', by: 'Claude' })
+  at(0.4, { type: 'actor', id: S1, label: 'Explorer', parent: M1, task: 'Survey the shader folder for dissolve effects', by: 'Claude', model: 'fable' })
   at(0.6, node('WaterSurface', H, 'shader', ['vert', 'frag', 'Wave'], null, 140))
   at(0.1, act('b1', S1, 'read', 'Read', WS))
   at(2.4, end('b1'))
@@ -259,6 +270,9 @@ function demoScript() {
   at(1.4, end('d2'))
   at(0.5, end('b7'))
   at(0.8, end('a9'))
+  // the report was not what was asked for: a word to the thrall after the fact (a correction)
+  at(0.7, act('a9m', M1, 'tool', 'SendMessage', null, null, 'Explorer'))
+  at(0.6, end('a9m'))
   at(0.3, think(M1, true))
   at(2.0, think(M1, false))
   at(0.1, node('PlayerStats', P, 'struct', ['Health', 'Stamina', 'Speed', 'DashCost'], null, 24))
@@ -412,7 +426,9 @@ function onBatch(res) {
     if (e.seq > src.seq) { src.seq = e.seq; ingest(e); got++ }
   }
   // a batch this large is a replay (a fresh page, a reconnect, a server restart), shown settled, not animated in
-  if (got >= 40) view.needSettle = true
+  // (once per load: later batches, such as the seed of earlier sessions, ease in like any other change)
+  if (got >= 40 && !view.settledOnce) view.needSettle = true
+  if (got > 0) src.lastEventAt = performance.now()
   load.got = src.seq
   // everything the server holds is here (or it holds nothing): the map can be shown
   if (load.active && load.total >= 0 && src.seq >= load.total) loadDone()
@@ -487,6 +503,7 @@ const H = { events: [], applied: 0, state: newState(), checks: [], t0: 0 }
 
 function ingest(e) {
   if (!e || typeof e.t !== 'number') return
+  if (e.type === 'hello') adoptDefaults(e)
   e.at = Date.now() // when it reached this page: a late batch still gets its moment on the live view
   const evs = H.events
   if (evs.length && e.t < evs[evs.length - 1].t) {
@@ -498,7 +515,8 @@ function ingest(e) {
     if (H.applied > lo) { const cp = H.checks.length ? H.checks[H.checks.length - 1] : null; H.state = cp ? structuredClone(cp.state) : newState(); H.applied = cp ? cp.idx : 0 }
     if (e.t < H.t0) H.t0 = e.t
   } else { evs.push(e); if (!H.t0) H.t0 = e.t }
-  layout.awake = Math.max(layout.awake, 90) // events wake the solver
+  // only what changes the map's shape wakes the solver (a thought, a transmit or a budget tick moves no tome)
+  if (e.type === 'node' || e.type === 'node-gone' || e.type === 'edge') layout.awake = Math.max(layout.awake, 90)
 }
 
 function resetAll() {
@@ -543,6 +561,7 @@ function apply(s, e) {
       let a = s.actors.get(e.id)
       if (!a) { a = { id: e.id, bornT: e.t, doneT: 0, thinking: false, thinkT: 0, wake: [], glances: [], lastActT: 0, lastT: e.t, task: '', by: '', spawnAct: '' }; s.actors.set(e.id, a) }
       a.label = e.label || e.id; a.parent = e.parent || ''; a.task = e.task || ''; a.by = e.by || ''; a.role = e.role || ''
+      if (e.model) a.model = e.model
       // a thrall grows out of the parent's agent act that summoned it (given, or inferred from the open one)
       if (e.spawn) a.spawnAct = e.spawn
       if (a.parent && !a.spawnAct) for (const act of s.acts.values()) if (act.kind === 'agent' && act.actor === a.parent && !act.endT) a.spawnAct = act.id
@@ -566,6 +585,9 @@ function apply(s, e) {
       s.acts.set(e.id, act)
       s.lastActor = e.actor; a.thinking = false; a.lastActT = e.t; a.lastT = e.t; a.idleT = 0
       touch(s, a, act, e.t)
+      // a word between a parent and a thrall, and the evidence of a correction (life.js)
+      if (act.tool === 'SendMessage' && a.parent) a.saidT = e.t
+      correctCheck(s, a, act, e.t)
       break
     }
     case 'act-wait': { const act = s.acts.get(e.id); if (act) act.waitT = e.t; break }
@@ -573,11 +595,13 @@ function apply(s, e) {
       const act = s.acts.get(e.id)
       if (!act) break
       act.endT = e.t; act.failed = !!e.failed; act.arrivedT = e.at || e.t
+      if (e.look) act.look = true
       const a = ensureActor(s, act.actor, e.t)
       a.lastT = e.t
       if (e.node && e.node !== act.node) { act.node = e.node; act.member = e.member || ''; touch(s, a, act, e.t) }
       else if (e.member && e.member !== act.member) { act.member = e.member; touch(s, a, act, e.t) }
       if (act.kind === 'edit' || act.kind === 'write') markEdit(s, act, e.t)
+      correctNote(a, act, e.t)
       if (act.kind === 'agent') for (const sub of s.actors.values()) if (sub.parent === act.actor && sub.bornT >= act.startT && !sub.doneT) sub.doneT = e.t
       break
     }
@@ -614,11 +638,14 @@ const WAIT_STALE = 1800000 // a wait on the human older than this is replayed hi
 const SESSION_MS = 600000, THRALL_LINGER = 6000, THRALL_ORPHAN_MS = 60000
 function actorPresent(s, a, T) {
   if (a.bornT > T) return false
+  if (a.corrT > 0 && T >= a.corrT && T - a.corrT < CORR_MS + CORR_HEAL) return true // brought back to be corrected
   if (!a.parent) return a.lastT > 0 && T - a.lastT < SESSION_MS
-  return !thrallDone(s, a, T) // a finished thrall fades out; scrubbing back shows it live again
+  return !thrallDone(s, a, T) // a finished thrall fades out
 }
 // a finished thrall: its summoning act ended (plus a short linger), or it went quiet for a minute
 function thrallDone(s, a, T) {
+  // its exact end, when the plugin reported it (and nothing of its has happened since)
+  if (a.idleT > 0 && a.idleT <= T && a.lastT <= a.idleT) return T - a.idleT > THRALL_LINGER
   const act = a.spawnAct ? s.acts.get(a.spawnAct) : null
   if (act) return act.endT > 0 && T - act.endT > THRALL_LINGER && T - a.lastT > THRALL_LINGER
   return T - Math.max(a.lastT, a.bornT) > THRALL_ORPHAN_MS
@@ -645,6 +672,10 @@ function markEdit(s, act, t) {
 }
 
 // fold forward incrementally; when going back, restore the nearest checkpoint and refold
+const CHECK_KEEP = 3000, CHECK_SPARSE = 1500, ACT_KEEP_MS = 120000
+function pruneActs(s, t) {
+  for (const [id, act] of s.acts) if (act.endT > 0 && act.kind !== 'agent' && t - act.endT > ACT_KEEP_MS) s.acts.delete(id)
+}
 function foldTo(T) {
   const evs = H.events
   if (H.applied > 0 && evs[H.applied - 1].t > T) {
@@ -655,7 +686,19 @@ function foldTo(T) {
   }
   while (H.applied < evs.length && evs[H.applied].t <= T) {
     apply(H.state, evs[H.applied]); H.applied++
-    if (H.applied % CHECK_EVERY === 0 && (H.checks.length === 0 || H.checks[H.checks.length - 1].idx < H.applied)) H.checks.push({ idx: H.applied, state: structuredClone(H.state) })
+    // every CHECK_EVERY events: acts that ended over two minutes of event time ago are dropped (nothing draws them
+    // any more; the rule depends only on the event index, so a refold from any checkpoint gives the same state),
+    // and a checkpoint is kept: dense near the head of the log, sparse far behind it
+    if (H.applied % CHECK_EVERY === 0) {
+      pruneActs(H.state, evs[H.applied - 1].t)
+      const far = evs.length - H.applied > CHECK_KEEP
+      if ((!far || H.applied % CHECK_SPARSE === 0) && (H.checks.length === 0 || H.checks[H.checks.length - 1].idx < H.applied)) {
+        H.checks.push({ idx: H.applied, state: structuredClone(H.state) })
+        // the view is always live: a checkpoint only serves a batch that arrives out of order or a trimmed log
+        // (see ingest), so the two newest are all that is kept
+        if (H.checks.length > 2) H.checks.splice(0, H.checks.length - 2)
+      }
+    }
   }
 }
 
@@ -663,11 +706,11 @@ function foldTo(T) {
 
 const vis = { nodes: new Map(), edges: new Map(), actors: new Map(), limbs: new Map(), wards: new Map(), props: new Map(), portals: new Map(), whirls: new Map(), piles: new Map(), souls: new Map() }
 const view = {
-  w: 1, h: 1, dpr: 1, live: true, T: 0, now: 0, cam: { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 },
-  userUntil: 0, drag: null, scrub: false, handle: 1, hover: null, hint: { text: '', until: 0 },
-  mx: -1, my: -1, follow: { x: 0, y: 0, z: 1 }, tickCount: -1, tickW: 0, tickAt: 0,
+  w: 1, h: 1, dpr: 1, now: 0, cam: { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 },
+  userUntil: 0, drag: null, hover: null, hint: { text: '', until: 0 },
+  mx: -1, my: -1, follow: { x: 0, y: 0, z: 1 },
 }
-const BAR_H = 18
+const BAR_H = 0 // (there is no bar at the bottom any more: the view is always live)
 const layout = { awake: 30, energy: 0 }
 
 // the card fits its full title (up to about twice the usual width); beyond that the title shrinks to 70%
@@ -745,13 +788,13 @@ function collectActs(S, T) {
   for (const act of focus.nodeEdit.values()) { let l = perActor.get(act.actor); if (!l) { l = []; perActor.set(act.actor, l) }; l.push(act) }
   for (const l of perActor.values()) { l.sort((a, b) => b.startT - a.startT); for (let i = 0; i < l.length && i < BURST_CAP; i++) focus.burst.add(l[i].id) }
   // touches: an edit tentacle on a tome electrifies it once per act, at the act's start, or on arrival when the batch
-  // came late (live only); a scrub backwards forgets, so the moment can be watched again
+  // came late; a refold from an earlier point forgets, so the moment plays again
   if (T < focus.lastT - 800) zapped.clear()
   focus.lastT = T
   const wall = Date.now()
   for (const act of S.acts.values()) {
     if (!act.node || (act.kind !== 'edit' && act.kind !== 'write') || act.startT > T || zapped.has(act.id)) continue
-    const fresh = T - act.startT < 2500 || (view.live && act.arrivedT && wall - act.arrivedT < 2500)
+    const fresh = T - act.startT < 2500 || (act.arrivedT && wall - act.arrivedT < 2500)
     if (!fresh) { if (T - act.startT > 2500) zapped.add(act.id); continue }
     zapped.add(act.id)
     const top = topOf(S, act.actor), sub = top !== act.actor
@@ -851,12 +894,22 @@ function actorGoal(S, a, V, T) {
       [N.x + N.w / 2 + k * 40, N.y - 70 - V.r + bob],
       [N.x + N.w / 2 + k * 40, N.y + N.h + 70 + V.r + bob],
     ]
-    for (let c = 0; c < cands.length; c++) {
+    const isFree = c => {
       const gx = cands[c][0], gy = cands[c][1]
-      let free = true
-      for (const O of vis.nodes.values()) if (O.present && O !== N && gx + m > O.x && gx - m < O.x + O.w && gy + m > O.y && gy - m < O.y + O.h) { free = false; break }
-      if (free) return cands[c]
+      for (const O of vis.nodes.values()) if (O.present && O !== N && gx + m > O.x && gx - m < O.x + O.w && gy + m > O.y && gy - m < O.y + O.h) return false
+      return true
     }
+    // the seat is kept: the creature moves to another side of the tome only once its own has been blocked for a
+    // while (cards drift under the seats all the time; choosing afresh every frame made it dart back and forth)
+    const nowS = performance.now()
+    if (V.seatN !== N.id) { V.seatN = N.id; V.seat = -1; V.seatBad = 0 }
+    if (V.seat >= 0) {
+      if (isFree(V.seat)) { V.seatBad = 0; return cands[V.seat] }
+      if (!V.seatBad) V.seatBad = nowS
+      if (nowS - V.seatBad < 700) return cands[V.seat]
+    }
+    for (let c = 0; c < cands.length; c++) if (isFree(c)) { V.seat = c; V.seatBad = 0; return cands[c] }
+    V.seat = 2; V.seatBad = 0
     return cands[2]
   }
   if (a.parent) { const P = vis.actors.get(a.parent); if (P) return [P.x + 90 + k * 30, P.y - 90] }
@@ -895,7 +948,8 @@ function syncActors(S, T, now, dt) {
       for (const o of vis.actors.values()) if (!o.parent) tops++
       const hue = a.parent ? THRALL : tops === 0 ? FLESHLINE : hslHex((48 + tops * 95) % 360, 0.3, 0.74)
       // a thrall is born at the tip of the summoning limb, the pentagram
-      const bp = P ? propPos(P, 'pentagram') : null
+      // (it appears at its parent's lower rim and swims out from there)
+      const bp = P ? [P.x, P.y + P.r * 1.4 + r] : null
       V = { id: a.id, parent: a.parent, r, x: bp ? bp[0] : tops * 260, y: bp ? bp[1] : -200, vx: 0, vy: 0, alpha: 0, born: a.parent ? 1 : 0, mood: 'idle', col: rgb(IRIS).slice(), open: 1, look: [0, 0], seed: hash(a.id), goalSide: -1, aura: 0, label: a.label, gaps: [null, null, null], fill: PYR, tone: hue, hue, swim: null, swimK: 0, swimLen: 0.8, swimSpread: 1, swimDx: 0, swimDy: 1, knot: 0, knotT: 0, pulse: 0 }
       vis.actors.set(a.id, V)
     }
@@ -960,7 +1014,12 @@ function syncActors(S, T, now, dt) {
       const N = nid ? vis.nodes.get(nid) : null
       if (N) V.goalSide = V.x < N.x + N.w / 2 ? -1 : 1
     }
-    freeSpot(g[0], g[1], V.r * 1.6); V.gx = isFinite(ptmp[0]) ? ptmp[0] : V.x; V.gy = isFinite(ptmp[1]) ? ptmp[1] : V.y
+    // one owner for the goal: it glides to where the seat is, so a seat that hops, a card pushed under it or a
+    // late batch of events never jerks the creature (the swim then follows a goal that only ever moves smoothly)
+    freeSpot(g[0], g[1], V.r * 1.6)
+    const rgx = isFinite(ptmp[0]) ? ptmp[0] : V.x, rgy = isFinite(ptmp[1]) ? ptmp[1] : V.y
+    if (V.gx === undefined || !isFinite(V.gx) || !isFinite(V.gy) || motion() < 0.02) { V.gx = rgx; V.gy = rgy }
+    else { V.gx = ease(V.gx, rgx, 7, dt); V.gy = ease(V.gy, rgy, 7, dt) }
     if (!isFinite(V.x) || !isFinite(V.y)) { V.x = isFinite(V.gx) ? V.gx : 0; V.y = isFinite(V.gy) ? V.gy : 0; V.vx = 0; V.vy = 0 }
     // the thrall this actor oversees during an open agent act
     V.thrall = ''
@@ -1031,7 +1090,7 @@ function propPos(V, kind) {
 const tmpT = [0, 0, 0]
 function newLimb(id, act, A, eye) {
   return { id, actor: act.actor, eye, kind: act.kind, ext: 0, extT: 1, tx: A.x, ty: A.y, tvx: 0, tvy: 0, closed: 0, closedT: 0, active: 0, wait: 0, seed: hash(id) % 1000, prop: PROP_OF[act.kind] || '', tool: act.tool, sacAt: 0, sacI: -1, sgx: A.x, sgy: A.y, lx: A.x, ly: A.y, wanderAt: 0, wanderNode: '',
-    side: -1, rootT: 0.44 + rnd(id, 'root') * 0.12, front: 0, frontT: 0, born: performance.now(), fresh: true, node: '', snake: !eye && !!act.node && (act.kind === 'edit' || act.kind === 'write'),
+    side: -1, rootT: A.fable && !eye ? 0.2 + rnd(id, 'root') * 0.6 : 0.44 + rnd(id, 'root') * 0.12, front: 0, frontT: 0, born: performance.now(), fresh: true, node: '', snake: !eye && !!act.node && (act.kind === 'edit' || act.kind === 'write'),
     tipEye: eye ? 1 : 0, tipClub: eye ? 0 : 1, scale: 0.7, blobs: [], ended: false }
 }
 // what a limb gulps when its act finishes: a blob the colour of the act, sucked in at the tip
@@ -1108,7 +1167,7 @@ function blinkStep(o, key, now, seed) {
 
 // how long ago an act ended, as the viewer experienced it: live, a batch that reached the page late still counts
 // from its arrival, so quick acts delivered after the fact are not skipped
-function since(act, T) { const a = T - act.endT; return view.live && act.arrivedT ? Math.min(a, Date.now() - act.arrivedT) : a }
+function since(act, T) { const a = T - act.endT; return act.arrivedT ? Math.min(a, Date.now() - act.arrivedT) : a }
 function syncLimbs(S, T, now, dt) {
   for (const L of vis.limbs.values()) L.seen = false
   for (const act of S.acts.values()) {
