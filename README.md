@@ -65,22 +65,85 @@ Members and bindings are extracted with lightweight parsers (no compilers): C#, 
 - **The view is empty.** The map grows from Claude's work; nothing is scanned up front. Open it, then give Claude something to do. `?demo` shows what a session looks like.
 - **The pane shows nothing in a hidden tab.** The page pauses its animation while hidden; bring it forward.
 - **Two copies of the plugin** (for example a development copy and the installed one) will fight over a session; the second is refused by the server and goes quiet.
-- **Something else went wrong.** Set ABYSSAL_EYE_LOG=<a file path> and the plugin writes one line per attempt to open the view and per open prompt it saw.
 
 ## What it reads, runs and sends
 
-Everything stays on your machine. There is no telemetry and nothing leaves the computer.
+Everything stays on your machine. There is no telemetry. The sections below list every hook, program, network call, file and prompt of the plugin.
 
-- **Reads**: the transcript of the current session and of its subagents (from the Claude Code projects folder). Earlier sessions of the project (up to 25 transcripts from the last 14 days, to seed the map with what was touched before) are read only when you opt in: set ABYSSAL_EYE_HISTORY=1, or press H in the view (remembered per browser, and in abyssal-eye-prefs.json under the Claude config folder once the plugin has seen it). The source files Claude touches are read and analysed (files over about 1.5 MB are skipped) and polled every 4 seconds afterwards so your own edits show up. Prompt excerpts (the first 80 characters) are kept in the local server's memory as part of the event stream, and so are file paths, class and member names.
-- **Runs**: one small Perl server (`web/server.pl`, plain readable source, core modules only) that serves the page and holds the event stream in memory, started detached with no window; on Windows it runs in the Perl that ships with Git for Windows, elsewhere in the system perl. It stays up while sessions talk to it and exits after 10 minutes of silence. It writes nothing to disk but a lock file in the temp folder. The "open in browser" paths use `cmd /c start` on Windows, `open` on macOS and `xdg-open` on Linux.
-- **Listens**: HTTP on loopback only, 127.0.0.1 and [::1], one port in 7311 to 7340. Requests from other machines are refused, and so are cross-site posts from web pages. One exception: the view page itself may POST /open-external (same origin only), which makes the server open the view in your system browser (`cmd /c start` on Windows, `open` on macOS, `xdg-open` on Linux); the address is built by the server from a known project key, never taken from the request. The page also sends a heartbeat every 3 s, POST /seen (same origin only: its instance id, the page version it loaded and whether it is shown), and the plugin reads GET /seen before it asks for the view to be opened, so it can tell whether a live, current, displayed view already exists; the server keeps only the last few seconds of these, in memory.
-- **Sends**: nothing anywhere but to that loopback server, with one exception: once a day the plugin fetches the published plugin manifest from raw.githubusercontent.com (a plain GET of plugin.json, no cookies and no identifying headers, so nothing about you beyond an ordinary HTTPS request) to compare versions; a newer one shows a status line and an Update button, and only your click runs `claude plugin marketplace update abyssal-eye` and `claude plugin update abyssal-eye@abyssal-eye`. Set ABYSSAL_EYE_NO_UPDATE_CHECK=1 to disable the check entirely (Claude Code's CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables it too). The last check and its result are kept in abyssal-eye-update.json under the Claude config folder.
+### Hooks
 
-Debug switches on the page (only with `?debug` in the address): `skip=<seconds>` and `noloop` for the demo, `nopause` to keep animating in a hidden tab, `stress=<n>` for a large demo map, and `window.__scope` for the live state.
+Each hook observes; none blocks, allows or rewrites what Claude or you do, with the one exception named under prompt.submit.
+
+- **session.start**: when a session starts. Works out the project (repository root), finds perl, starts or finds the local server, replays the session's own transcript into the map, registers the `/abyssal-eye` command and starts its timers (push events every 100 ms, ping every 10 s, look for your own edits to mapped files every 4 s). Decides nothing; always lets the session start.
+- **tool.call**: around every tool call of the session and its subagents. Sees the tool's name and input. For Read, Edit, Write, NotebookEdit, Grep and Glob it reads the file the call names and analyses it; for Bash it records the description and whether the command only looks; for Agent it records the description and a prompt excerpt (160 characters). It then lets the call run unchanged and records whether it failed. It never changes a call's input or result, never denies or allows a call, and never calls a tool itself.
+- **turn.start**: when a turn starts. Records the first 80 characters of your prompt as the map's caption (not for the plugin's own open line) and notes that Claude is busy. Changes nothing.
+- **turn.step**: around each request to the model. Records that Claude is thinking, the number of messages sent, and afterwards the context window use (tokens used and window size, from the session's own usage figures) for the souls. Passes every chunk through unread and unchanged.
+- **turn.complete**: when a turn ends. Records that Claude is idle. Changes nothing.
+- **classic.PermissionRequest**: when a permission dialog is shown. Records that the pending call waits on you (the open mouth). It does not answer the dialog and has no say in the decision.
+- **prompt.submit**: when a prompt is submitted. It acts only on the plugin's own open line (text exactly "⛧ Open the Abyssal Eye", submitted by this plugin): it attaches the instructions quoted under Prompts as hidden context. Every other prompt passes through untouched.
+- **prompt.context**: once per conversation, when the context blocks of the first message are built. Adds one block named `abyssalEye` that tells Claude what the open line means (the same instructions as under Prompts). Changes no other block.
+- **command.run** (`/abyssal-eye`): opens the view (see Prompts), or with `browser` opens the system browser.
+- **ui.render** (AbovePrompt): draws the "⛧ Abyssal Eye" and "↗ Open in browser" buttons, and "⬆ Update to <version>" when an update is known.
+
+### Programs run
+
+- **perl** `<plugin>/web/server.pl --root <plugin>/web --port 7311 --daemon`: the local server (plain readable Perl, core modules only). It serves the page and holds the event stream in memory, started once per machine, detached, with no window; it exits after 10 minutes without a session. On macOS and Linux perl is run by name. On Windows perl is not on the PATH, so the plugin looks for the `usr\bin\perl.exe` inside Git for Windows (from CLAUDE_CODE_GIT_BASH_PATH, else `C:\Program Files\Git`, `C:\Program Files (x86)\Git`, `%LOCALAPPDATA%\Programs\Git`) and runs that file; that is the only program path worked out at run time.
+- **perl -v**: once at session start, to learn whether perl exists.
+- **uname -s**: once at session start on macOS and Linux, to tell the two apart.
+- **cmd /c start "" <view address>** (Windows), **open <view address>** (macOS), **xdg-open <view address>** (Linux): opens the view in your system browser, only when you press "↗ Open in browser", run `/abyssal-eye browser`, or the browser pane is unavailable. The address is always the plugin's own `http://localhost:<port>/p/<project>/`.
+- **claude plugin marketplace update abyssal-eye** then **claude plugin update abyssal-eye@abyssal-eye**: only when you click the Update button.
+- The server itself runs the same browser opener (`cmd /c start`, `open` or `xdg-open`) when you press the ↗ control inside the view; it builds the address itself from a project it already knows.
+
+No shell is invoked and no inline script is run.
+
+### Network
+
+- **127.0.0.1, ports 7311 to 7340** (the local server, loopback only): the plugin sends the session's events (tool names, file paths, class and member names, counts of added and removed lines, prompt excerpts of 80 characters, context window use) to `/push`, a keep-alive to `/ping`, and reads `/hello`, `/seen` and `/pref`. The server listens on 127.0.0.1 and [::1] only, refuses peers that are not loopback, refuses requests whose Host is not localhost, 127.0.0.1 or [::1], and refuses cross-site posts. The view page talks to the same server (events, a heartbeat every 3 s with its instance id, the page version and whether it is shown, your earlier-sessions switch, and the ↗ control).
+- **raw.githubusercontent.com** (only in builds whose `config.json` has `"updateCheck": true`, and never when ABYSSAL_EYE_NO_UPDATE_CHECK=1 or CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set): one GET of `https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/.claude-plugin/plugin.json` per session start, with no body, no cookies and no headers of the plugin's own, to compare versions. Nothing about you or your project is sent.
+
+Nothing else is contacted.
+
+### Files
+
+- **Read**: the current session's transcript and its subagents' transcripts under `<Claude config folder>/projects/<project>/` (only those `.jsonl` files; nothing else in the config folder is opened); earlier transcripts of the same project (up to 25 from the last 14 days) only when you opt in with ABYSSAL_EYE_HISTORY=1 or the H key in the view; the source files Claude touches (files over about 1.5 MB are skipped), read again when they change so your own edits show; the plugin's own `config.json` and `.claude-plugin/plugin.json`.
+- **Written by the plugin**: none. It writes no settings, instruction, build or start-up file, and no file of its own.
+- **Written by the server**: one empty lock file, `abyssal-eye-server.lock`, in `$XDG_RUNTIME_DIR`, else `~/.cache`, else the temp folder (there named `abyssal-eye-server-<user>.lock`), so only one server runs. The event stream is kept in memory only.
+- **In your browser**: the view keeps its settings (quality, motion, tilt, pinned cards, the earlier-sessions switch) in localStorage for its own address.
+
+### Prompts submitted
+
+One, and only when you press the "⛧ Abyssal Eye" button or run `/abyssal-eye` in the desktop app while no current view is already displayed. The visible message, sent in your name, is exactly:
+
+```
+⛧ Open the Abyssal Eye
+```
+
+The hidden context attached to it (Claude reads it, the chat does not show it) is:
+
+```
+The user pressed the Abyssal Eye button. Act immediately: do not think, plan or explain. Call <browser pane>preview_start with url http://localhost:<port>/p/<project>/?pane=1. Then call <browser pane>tabs_context and <browser pane>tabs_close on every other tab whose origin is http://localhost or http://127.0.0.1 on a port from 7311 to 7340, keeping only the tabId preview_start returned; never touch a tab of any other origin. If preview_start fails, call it once more; if it fails again reply with the one line "The pane did not open." and nothing else. Make no other tool calls. Reply with exactly the single character ⛧ and no other text.
+```
+
+The tab clean-up sentence is included only when a view is already open; when the pane's tools are not loaded yet, the first sentence asks for one ToolSearch that selects those three tools. The plugin itself never calls a tool: Claude does, in a turn you asked for. No other prompt is ever submitted, and nothing from your files or transcripts is put in a prompt.
+
+### Credentials
+
+None. The plugin reads no token, key, password or credentials file, and has nowhere to send one. The environment variables it reads are OS, SYSTEMROOT, LOCALAPPDATA, USERPROFILE, HOME, CLAUDE_CONFIG_DIR and CLAUDE_CODE_GIT_BASH_PATH (to find folders and perl), and its own switches ABYSSAL_EYE_HISTORY, ABYSSAL_EYE_NO_UPDATE_CHECK and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC. The context window figures come from the session's own usage call and stay on the machine.
+
+### Reflective code
+
+One small helper reads a named field of a tool call's input by its key (for example `file_path`, `command` or `description`), because every tool has a different input shape. The keys are fixed words in the source. There is no eval, no generated code and no dynamic import.
+
+### Switches
+
+- `ABYSSAL_EYE_HISTORY=1`: also seed the map from earlier sessions of the project (or press H in the view).
+- `ABYSSAL_EYE_NO_UPDATE_CHECK=1`: no update check.
+- `config.json` in the plugin folder, `"updateCheck": false`: no update check, no Update button, no `claude` command.
+- On the page, only with `?debug` in the address: `skip=<seconds>` and `noloop` for the demo, `nopause` to keep animating in a hidden tab, `stress=<n>` for a large demo map, and `window.__scope` for the live state.
 
 ## Privacy
 
-Everything stays on your machine: the map, the event stream and the prompt excerpts live in the memory of a loopback-only local server and in your browser; nothing is uploaded. The plugin reads your own session transcripts and the source files Claude touches, and earlier transcripts of the project only when you opt in. The only outbound request is the optional daily update check described above, which can be turned off.
+Everything stays on your machine: the map, the event stream and the prompt excerpts live in the memory of a loopback-only local server and in your browser; nothing is uploaded. The plugin reads your own session transcripts and the source files Claude touches, and earlier transcripts of the project only when you opt in. The only outbound request is the optional update check described above (one GET of the published manifest at session start), which can be turned off and is off in the directory build.
 
 ## Support
 

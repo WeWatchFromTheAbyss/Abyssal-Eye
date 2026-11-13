@@ -27,8 +27,8 @@ export class Tracker {
   /** The replay is queued: the events that waited follow it, in the order they came. */
   release(): void {
     this.hold = false
-    const h = this.held; this.held = []
-    for (const x of h) this.emit(x.body, x.t)
+    const waiting = this.held; this.held = []
+    for (const x of waiting) this.emit(x.body, x.t)
   }
 
   rel(path: string | undefined): string | undefined {
