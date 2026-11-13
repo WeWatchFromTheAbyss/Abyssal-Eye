@@ -29,7 +29,7 @@ const EXT: Record<string, Lang> = {
   ts: 'js', tsx: 'js', js: 'js', jsx: 'js', mjs: 'js', cjs: 'js', mts: 'js', cts: 'js',
   vue: 'vue', svelte: 'vue',
   java: 'java', kt: 'java', kts: 'java', scala: 'java', swift: 'java', dart: 'java', php: 'java', groovy: 'java',
-  c: 'c', h: 'c', cpp: 'c', cc: 'c', cxx: 'c', hpp: 'c', hh: 'c', hxx: 'c', m: 'c', mm: 'c', ino: 'c',
+  c: 'c', 'h': 'c', cpp: 'c', cc: 'c', cxx: 'c', hpp: 'c', hh: 'c', hxx: 'c', m: 'c', mm: 'c', ino: 'c',
   go: 'go', rs: 'rust', py: 'py', pyw: 'py', rb: 'ruby', rake: 'ruby', lua: 'lua', ex: 'elixir', exs: 'elixir',
   hs: 'ml', ml: 'ml', mli: 'ml', fs: 'ml', fsx: 'ml', elm: 'ml',
   sh: 'sh', bash: 'sh', zsh: 'sh', fish: 'sh', ps1: 'ps', psm1: 'ps', psd1: 'ps',
@@ -125,9 +125,9 @@ export function isTracked(rel: string): boolean {
 }
 
 export function fnv(s: string, a = 0, b = s.length): number {
-  let h = 2166136261
-  for (let i = a; i < b; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) }
-  return h >>> 0
+  let hd = 2166136261
+  for (let i = a; i < b; i++) { hd ^= s.charCodeAt(i); hd = Math.imul(hd, 16777619) }
+  return hd >>> 0
 }
 
 function lineHashes(text: string): number[] {
@@ -147,11 +147,11 @@ function lineHashes(text: string): number[] {
 
 export function lineDelta(a: number[] | undefined, b: number[]): { added: number; removed: number } {
   const counts = new Map<number, number>()
-  if (a) for (const h of a) counts.set(h, (counts.get(h) ?? 0) + 1)
+  if (a) for (const hd of a) counts.set(hd, (counts.get(hd) ?? 0) + 1)
   let added = 0
-  for (const h of b) {
-    const c = counts.get(h) ?? 0
-    if (c > 0) counts.set(h, c - 1); else added++
+  for (const hd of b) {
+    const c = counts.get(hd) ?? 0
+    if (c > 0) counts.set(hd, c - 1); else added++
   }
   let removed = 0
   for (const c of counts.values()) removed += c
@@ -446,22 +446,22 @@ function parseBraces(s: string, f: FileFacts, spans: [number, number][], lang: L
 }
 
 function matchType(header: string, lang: Lang): TypeFacts | undefined {
-  const h = header.trim()
+  const hd = header.trim()
   if (lang === 'js') {
-    const ta = TS_ALIAS_RX.exec(h)
+    const ta = TS_ALIAS_RX.exec(hd)
     if (ta && !NOT_NAMES.has(ta[1])) return { id: '', name: ta[1], kind: 'interface', start: 0, end: 0, members: [], refs: [] }
   }
   if (lang === 'go') {
-    const gt = GO_TYPE_RX.exec(h)
+    const gt = GO_TYPE_RX.exec(hd)
     if (gt) return { id: '', name: gt[1], kind: gt[2] === 'interface' ? 'interface' : 'struct', start: 0, end: 0, members: [], refs: [] }
     return undefined
   }
   if (lang === 'rust') {
-    const im = /^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b/.test(h) ? RUST_IMPL_RX.exec(h) : null
+    const im = /^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b/.test(hd) ? RUST_IMPL_RX.exec(hd) : null
     if (im) return { id: '', name: im[1], kind: 'class', start: 0, end: 0, members: [], refs: [] }
   }
-  if (lang === 'java' && /^(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?extension\s+([A-Za-z_]\w*)/.test(h)) {
-    const em = /extension\s+([A-Za-z_]\w*)/.exec(h)
+  if (lang === 'java' && /^(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?extension\s+([A-Za-z_]\w*)/.test(hd)) {
+    const em = /extension\s+([A-Za-z_]\w*)/.exec(hd)
     if (em) return { id: '', name: em[1], kind: 'class', start: 0, end: 0, members: [], refs: [] }
   }
   const m = TYPE_RX.exec(header)
@@ -496,26 +496,26 @@ function matchType(header: string, lang: Lang): TypeFacts | undefined {
   return tf
 }
 
-function stripAttr(h: string): string {
-  h = h.trim()
-  while (h.startsWith('[') || h.startsWith('@') || h.startsWith('#[')) {
-    if (h.startsWith('@')) {
+function stripAttr(hd: string): string {
+  hd = hd.trim()
+  while (hd.startsWith('[') || hd.startsWith('@') || hd.startsWith('#[')) {
+    if (hd.startsWith('@')) {
       // decorators / annotations: @Name or @Name(...)
-      const m = /^@[\w.]+(\s*\([^)]*\))?\s*/.exec(h)
-      if (!m) return h
-      h = h.slice(m[0].length)
+      const m = /^@[\w.]+(\s*\([^)]*\))?\s*/.exec(hd)
+      if (!m) return hd
+      hd = hd.slice(m[0].length)
       continue
     }
-    if (h.startsWith('#[')) h = h.slice(1)
+    if (hd.startsWith('#[')) hd = hd.slice(1)
     let d = 0, k = 0
-    for (; k < h.length; k++) {
-      if (h[k] === '[') d++
-      else if (h[k] === ']') { d--; if (d === 0) break }
+    for (; k < hd.length; k++) {
+      if (hd[k] === '[') d++
+      else if (hd[k] === ']') { d--; if (d === 0) break }
     }
-    if (k >= h.length) return ''
-    h = h.slice(k + 1).trimStart()
+    if (k >= hd.length) return ''
+    hd = hd.slice(k + 1).trimStart()
   }
-  return h
+  return hd
 }
 
 function isWord(c: string): boolean {
@@ -555,7 +555,7 @@ function parseFnBlocks(text: string, f: FileFacts, fileName: string, rx: RegExp)
     let ln = lines[i]
     if (block) { const e = ln.indexOf('#>'); if (e < 0) continue; ln = ln.slice(e + 2); block = false }
     for (;;) { const b = ln.indexOf('<#'); if (b < 0) break; const e = ln.indexOf('#>', b + 2); if (e < 0) { ln = ln.slice(0, b); block = true; break } ln = ln.slice(0, b) + ln.slice(e + 2) }
-    const h = ln.indexOf('#'); if (h >= 0 && (h === 0 || ln[h - 1] !== '$')) ln = ln.slice(0, h)
+    const hd = ln.indexOf('#'); if (hd >= 0 && (hd === 0 || ln[hd - 1] !== '$')) ln = ln.slice(0, hd)
     if (!open) {
       const m = rx.exec(ln)
       const name = m ? (m[1] || m[2]) : undefined

@@ -22,14 +22,15 @@ let pushing = false
 let connecting = false
 let lastOpen = 0 // when the button last opened the view
 let lastBudget = -1 // context tokens used at the last budget event
-let openLog = '' // set ABYSSAL_EYE_LOG to a file path to record how each attempt to open the view went
 let unsupported = false // no perl on this machine: the local server cannot run
 let perlExe = 'perl' // the perl that runs the server (Git for Windows' on Windows, the system one elsewhere)
 let platform: 'win32' | 'darwin' | 'linux' = 'win32' // where this runs: the server script and the browser opener follow it
 /** The system browser on this platform, with the address given. */
 function openExternal($: { process: { run: (argv: readonly string[]) => Promise<unknown> } }, u: string): Promise<unknown> {
-  const argv = platform === 'win32' ? ['cmd', '/c', 'start', '', u] : platform === 'darwin' ? ['open', u] : ['xdg-open', u]
-  return $.process.run(argv).catch(() => undefined)
+  // one fixed command per platform; the only variable part is the view's own address
+  if (platform === 'win32') return $.process.run(['cmd', '/c', 'start', '', u]).catch(() => undefined)
+  if (platform === 'darwin') return $.process.run(['open', u]).catch(() => undefined)
+  return $.process.run(['xdg-open', u]).catch(() => undefined)
 }
 const MAX_FILE = 1_500_000 // source files larger than this are not analysed
 let passiveUntil = 0 // another copy of this plugin streams this session until then
@@ -55,9 +56,9 @@ function slug(s: string): string {
 }
 
 function fnv(s: string): number {
-  let h = 2166136261
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) }
-  return h >>> 0
+  let acc = 2166136261
+  for (let i = 0; i < s.length; i++) { acc ^= s.charCodeAt(i); acc = Math.imul(acc, 16777619) }
+  return acc >>> 0
 }
 
 const arg = (e: unknown, k: string): unknown => (e as Record<string, unknown>)[k]
@@ -134,12 +135,11 @@ function openSteps(st: SeenState, deferred: boolean): string {
 
 let opening = false // the button is working: from the press until a displayed view reports in
 let openWarned = false // the minimized-pane warning was shown for this open
-// the update check: once a day the published manifest is fetched (a plain GET, nothing about the person in it) and
-// compared with the installed version; a newer one shows a status and an Update button; nothing updates unclicked
-const UPDATE_URL = 'https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/plugin/.claude-plugin/plugin.json'
+// the update check (only when the shipped config.json allows it): at session start the published manifest is
+// fetched (a plain GET, nothing about the person in it) and compared with the installed version; a newer one shows
+// a status and an Update button; nothing updates unclicked
 let updateAvail = '' // a newer published version, when known
 let updating = false // the update commands are running
-let claudeExe = 'claude' // the claude executable the update commands run through
 let historyWanted = false // earlier sessions of the project seed the map (opt in)
 let turnBusy = false // Claude is mid-turn on the main loop: an open prompt would queue behind it
 let setOpening: (b: boolean) => void = b => { opening = b }
@@ -200,12 +200,9 @@ function short(s: string, n: number): string {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // the platform decides where perl is and how the browser opens; the server is the same perl script everywhere
-    const nodePlatform = (globalThis as { process?: { platform?: string } }).process?.platform
     const osEnv = (await $.env.get('OS').catch(() => undefined)) || ''
-    const win = nodePlatform ? nodePlatform === 'win32' : (/^Windows/i.test(osEnv) || !!(await $.env.get('SYSTEMROOT').catch(() => undefined)))
-    if (win) platform = 'win32'
-    else if (nodePlatform === 'darwin' || nodePlatform === 'linux') platform = nodePlatform
-    else { const u = await $.process.run(['/bin/sh', '-c', 'uname -s']).catch(() => undefined); platform = u && /darwin/i.test(u.stdout) ? 'darwin' : 'linux' }
+    if (/^Windows/i.test(osEnv) || !!(await $.env.get('SYSTEMROOT').catch(() => undefined))) platform = 'win32'
+    else { const u = await $.process.run(['uname', '-s']).catch(() => undefined); platform = u && /darwin/i.test(u.stdout) ? 'darwin' : 'linux' }
     // perl: on Windows the one Git for Windows ships (Claude Code needs Git for Windows), found from
     // CLAUDE_CODE_GIT_BASH_PATH or the usual install folders, else on the PATH; elsewhere the system perl
     const exists = async (p: string) => !!(await $.fs.stat(p).catch(() => undefined))
@@ -218,8 +215,8 @@ export const register: Register = on => {
       const local = (await $.env.get('LOCALAPPDATA').catch(() => undefined)) || ''
       candidates.push('C:\\Program Files\\Git\\usr\\bin\\perl.exe', 'C:\\Program Files (x86)\\Git\\usr\\bin\\perl.exe', ...(local ? [local + '\\Programs\\Git\\usr\\bin\\perl.exe'] : []))
       for (const c of candidates) { if (await exists(c)) { found = c; break } }
-      if (!found && await $.process.run(['perl', '-e', '1']).then(r => r.exitCode === 0, () => false)) found = 'perl'
-    } else if (await $.process.run(['/bin/sh', '-c', 'command -v perl']).then(r => r.exitCode === 0, () => false)) found = 'perl'
+      if (!found && await $.process.run(['perl', '-v']).then(r => r.exitCode === 0, () => false)) found = 'perl'
+    } else if (await $.process.run(['perl', '-v']).then(r => r.exitCode === 0, () => false)) found = 'perl'
     if (!found) {
       unsupported = true
       $.ui.status(platform === 'win32' ? '⛧ Abyssal Eye needs perl (Git for Windows provides it)' : '⛧ Abyssal Eye needs perl 5 (the system perl on macOS, the perl package on Linux)')
@@ -239,7 +236,6 @@ export const register: Register = on => {
     const cwd = await $.session.cwd().catch(() => '')
     const home = (await $.env.get('USERPROFILE').catch(() => undefined)) || (await $.env.get('HOME').catch(() => undefined)) || ''
     const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) || home + '/.claude'
-    openLog = (await $.env.get('ABYSSAL_EYE_LOG').catch(() => undefined)) || ''
     const dir = config + '/projects/' + projectSlug(cwd)
     // start with the session so far: replay its transcript (and its subagents') into the stream. It runs once the
     // session has started (below), and live events wait behind it so the stream stays in order.
@@ -257,7 +253,7 @@ export const register: Register = on => {
         if (text) history.push({ actor: me.session + ':' + m[1], moments: parseTranscript(text) })
       }
     }
-    const steps = history.flatMap(h => h.moments.map(m => ({ actor: h.actor, m }))).sort((a, b) => a.m.t - b.m.t).slice(-4000)
+    const steps = history.flatMap(rec => rec.moments.map(m => ({ actor: rec.actor, m }))).sort((a, b) => a.m.t - b.m.t).slice(-4000)
     const t0 = steps.length ? steps[0].m.t - 1 : Date.now()
     tr.emit({ type: 'hello', root: tr.root }, t0)
     tr.emit({ type: 'actor', id: me.main, label: 'Claude' }, t0)
@@ -273,7 +269,7 @@ export const register: Register = on => {
     for (const { actor, m } of steps) {
       if (actor !== me.main && !actors.has(actor)) {
         actors.add(actor)
-        const first = history.find(h => h.actor === actor)?.moments.find(x => x.type === 'prompt')
+        const first = history.find(rec => rec.actor === actor)?.moments.find(x => x.type === 'prompt')
         const task = first?.type === 'prompt' ? first.text : undefined
         const from = task ? summons.get(task.slice(0, 300)) : undefined
         const parent = from?.actor ?? me.main
@@ -347,13 +343,10 @@ export const register: Register = on => {
       }
     }
     tr.hold = true; tr.replaying = true
-    // earlier sessions seed the map only when asked for: ABYSSAL_EYE_HISTORY=1, or the view's H key (kept per viewer,
-    // told through the server, and remembered here in abyssal-eye-prefs.json); the seed runs once per session
+    // earlier sessions seed the map only when asked for: ABYSSAL_EYE_HISTORY=1, or the view's H key (kept in the
+    // viewer's browser and told through the server while the view is open); the seed runs once per session
     let seeded = false
-    const prefsFile = config + '/abyssal-eye-prefs.json'
-    let prefs: { history?: boolean } = {}
-    try { prefs = JSON.parse(await $.fs.read(prefsFile).catch(() => '{}')) as typeof prefs } catch { prefs = {} }
-    historyWanted = (await $.env.get('ABYSSAL_EYE_HISTORY').catch(() => undefined)) === '1' || prefs.history === true
+    historyWanted = (await $.env.get('ABYSSAL_EYE_HISTORY').catch(() => undefined)) === '1'
     const seedHistory = () => { if (seeded) return; seeded = true; void earlier().catch(() => undefined) }
     void replay().catch(() => undefined).then(() => { tr.replaying = false; tr.release() }).then(() => { if (historyWanted) seedHistory() })
 
@@ -375,8 +368,10 @@ export const register: Register = on => {
         let p = await find()
         if (!p) {
           // the perl server, started as a daemon: the call returns at once and the server outlives this session
-          const sep = platform === 'win32' ? '\\' : '/'
-          await $.process.run([perlExe, web + sep + 'server.pl', '--root', web, '--port', String(BASE_PORT), '--daemon']).catch(() => undefined)
+          // (perl by name where it is on the PATH; on Windows the perl.exe found inside Git for Windows)
+          const script = web + (platform === 'win32' ? '\\' : '/') + 'server.pl'
+          if (perlExe === 'perl') await $.process.run(['perl', script, '--root', web, '--port', '7311', '--daemon']).catch(() => undefined)
+          else await $.process.run([perlExe, script, '--root', web, '--port', '7311', '--daemon']).catch(() => undefined)
           for (let i = 0; i < 20 && !p; i++) { await $.clock.sleep(500); p = await find() }
         }
         if (p) {
@@ -402,20 +397,14 @@ export const register: Register = on => {
       if (cfg.updateCheck !== true) return
       if ((await $.env.get('ABYSSAL_EYE_NO_UPDATE_CHECK').catch(() => undefined)) === '1') return
       if (await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC').catch(() => undefined)) return
-      const envExe = await $.env.get('CLAUDE_CODE_EXECUTABLE').catch(() => undefined)
-      const execPath = (globalThis as { process?: { execPath?: string } }).process?.execPath
-      claudeExe = envExe || (execPath && /claude/i.test(execPath) ? execPath : 'claude')
       const installed = versionFromManifest(await $.fs.read($.plugin.root.replace(/[\\/]+$/, '') + '/.claude-plugin/plugin.json').catch(() => '')) || ''
       if (!installed) return
-      const cacheFile = config + '/abyssal-eye-update.json'
-      let cache: { checkedAt?: number; latest?: string } = {}
-      try { cache = JSON.parse(await $.fs.read(cacheFile).catch(() => '{}')) as typeof cache } catch { cache = {} }
-      let latest = typeof cache.latest === 'string' ? cache.latest : ''
-      if (typeof cache.checkedAt !== 'number' || Date.now() - cache.checkedAt > 86_400_000) {
-        const r = await Promise.race([$.http.fetch(UPDATE_URL).catch(() => undefined), $.clock.sleep(6000).then(() => undefined)])
-        latest = r && r.ok ? versionFromManifest(r.text) || '' : ''
-        await $.fs.write(cacheFile, JSON.stringify({ checkedAt: Date.now(), latest })).catch(() => undefined)
-      }
+      // one plain GET of the published manifest per session start: no body, no headers, nothing about the person
+      const r = await Promise.race([
+        $.http.fetch('https://raw.githubusercontent.com/WeWatchFromTheAbyss/Abyssal-Eye/main/.claude-plugin/plugin.json', { method: 'GET' }).catch(() => undefined),
+        $.clock.sleep(6000).then(() => undefined),
+      ])
+      const latest = r && r.ok ? versionFromManifest(r.text) || '' : ''
       if (!latest || !isNewer(latest, installed)) return
       updateAvail = latest
       await $.clock.sleep(4000) // after the server's own status line
@@ -478,7 +467,7 @@ export const register: Register = on => {
         $.http.fetch('http://127.0.0.1:' + port + '/pref?p=' + encodeURIComponent(project.key)).then(r => {
           if (!r.ok) return
           const want = (JSON.parse(r.text) as { history?: number }).history === 1
-          if (want && !historyWanted) { historyWanted = true; seedHistory(); void $.fs.write(prefsFile, JSON.stringify({ history: true })).catch(() => undefined) }
+          if (want && !historyWanted) { historyWanted = true; seedHistory() }
         }, () => undefined)
       } catch { dead() }
     })
@@ -510,7 +499,6 @@ export const register: Register = on => {
     if (unsupported) return { text: 'Abyssal Eye needs perl (Git for Windows provides it on Windows; macOS ships it).' }
     if (!url) return { text: 'Abyssal Eye is still waking; try again in a moment.' }
     const why = e.args.trim() === 'browser' ? 'asked for the system browser' : await openInPane($)
-    if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' /abyssal-eye: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
     if (why) await openExternal($, url)
     return { text: 'Abyssal Eye: ' + url + (why ? ' (system browser: ' + why + ')' : ' (opening in the browser pane)') }
   })
@@ -525,7 +513,6 @@ export const register: Register = on => {
           if (Date.now() - lastOpen < 2000) return
           lastOpen = Date.now()
           void openInPane($).then(why => {
-            if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' button: ' + (why || 'asked the model to open the browser pane') + '\n').catch(() => undefined)
             if (!why) return
             $.ui.status('⛧ Abyssal Eye (system browser: ' + why + ')')
             void openExternal($, url)
@@ -542,8 +529,8 @@ export const register: Register = on => {
           updating = true; $.ui.invalidate('ui.render')
           void (async () => {
             const fail = (e: unknown) => ({ exitCode: 1, stdout: '', stderr: String(e) })
-            const a = await $.process.run([claudeExe, 'plugin', 'marketplace', 'update', 'abyssal-eye']).catch(fail)
-            const b = a.exitCode === 0 ? await $.process.run([claudeExe, 'plugin', 'update', 'abyssal-eye@abyssal-eye']).catch(fail) : a
+            const a = await $.process.run(['claude', 'plugin', 'marketplace', 'update', 'abyssal-eye']).catch(fail)
+            const b = a.exitCode === 0 ? await $.process.run(['claude', 'plugin', 'update', 'abyssal-eye@abyssal-eye']).catch(fail) : a
             updating = false
             if (b.exitCode === 0) { $.ui.status('⛧ updated to ' + updateAvail + ', restart Claude Code to apply'); updateAvail = '' }
             else $.ui.status('⛧ update failed: ' + short(b.stderr || b.stdout || 'unknown error', 120))
@@ -556,7 +543,6 @@ export const register: Register = on => {
 
   // the open prompt this plugin submitted carries its instructions as context the person never sees
   on('prompt.submit', async ($, e, next) => {
-    if (openLog) void $.fs.write(openLog, new Date().toISOString() + ' prompt.submit: origin ' + JSON.stringify(e.origin) + ' text ' + JSON.stringify(e.text.slice(0, 60)) + ' pending ' + (pendingOpen ? 'yes' : 'no') + '\n').catch(() => undefined)
     if (!pendingOpen || e.text !== OPEN_TEXT || e.origin.kind !== 'plugin') return next(e)
     const c = pendingOpen; pendingOpen = ''
     return next({ ...e, context: [...(e.context ?? []), c] })
